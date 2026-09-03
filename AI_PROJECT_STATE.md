@@ -4,55 +4,56 @@
 
 **Goal**
 
-Prepare Engineering MCP V1 as a local stdio coordination ledger for one repository owner and role-constrained Junior/Principal workers. Do not implement until the V1 proposal is reviewed.
+Engineering MCP V1 is a local stdio coordination ledger for one repository owner and role-constrained Junior/Principal workers.
 
 **Status**
 
-Reached: `AGENTS.md` §21 describes the planned V1 boundary, not a server that already exists. Product intent for V1 is confirmed. This directory is a Git repository with a governance checkpoint. Toolchain inspection found Node.js v24.13.1, npm 11.8.0, and `@modelcontextprotocol/server@2.0.0` (engines `node >= 20`). Not reached: MCP source, schema, tests, or a runnable server.
+V1 is implemented: TypeScript ESM stdio server, `node:sqlite` ledger, and role-filtered tools. Direct `node src/index.ts` execution works without `tsx`. Independent review of the committed V1 is the next gate.
 
 **Next**
 
-Review the V1 implementation proposal. After acceptance, implement the smallest stdio MCP that satisfies the confirmed V1 contract.
+Independent review of committed V1. Do not configure Grok/Codex MCP clients until that review completes. Do not broaden V1.
 
 ---
 
 ## Current Architecture Snapshot
 
-- Product: a local Engineering MCP coordination ledger. Transport is stdio. No HTTP service.
-- Roles: OWNER (Grok), JUNIOR (Luna), PRINCIPAL (Sol). Process role is a launch argument (`--role`), not a tool argument.
-- Task types: IMPLEMENTATION → JUNIOR, DIAGNOSIS → PRINCIPAL.
-- Persistence: SQLite outside the target product repository, in a user-local application-data directory. This repository must not contain the live coordination database.
-- Git access from the MCP is read-only (root, branch, HEAD, working-tree status). It must not modify Git state.
-- Writer ownership is simple: at most one JUNIOR IMPLEMENTATION task may hold the external writer slot while RUNNING. PRINCIPAL diagnosis does not become writer.
-- Preferred stack: TypeScript with official MCP SDK v2 (`@modelcontextprotocol/server`, not legacy `@modelcontextprotocol/sdk`).
-- Connected Automations `tasks` MCP is unrelated and must not be used as this ledger.
-- See `AGENTS.md` §21 for planned V1 capabilities and non-goals.
+- Launch: `node src/index.ts --role owner|junior|principal --repo <target> [--db <path>]`. Role is process identity, not a tool argument.
+- Transport: local stdio via `@modelcontextprotocol/server` v2 `serveStdio`.
+- Persistence: `node:sqlite` (`DatabaseSync`) with WAL, foreign keys, 5s busy timeout, and `user_version = 1`. Live DB is outside the target repo (`%LOCALAPPDATA%\engineering-mcp\ledgers\<key>\ledger.sqlite` unless `--db` is set).
+- Tables: `tasks` (authoritative) and `task_events` (audit only).
+- At most one `RUNNING` task per ledger, any type. IMPLEMENTATION RUNNING is the JUNIOR writer slot. DIAGNOSIS RUNNING is read-only but still exclusive.
+- Git access is read-only (`rev-parse`, `status --porcelain=v1`). `create_task` / `claim_task` / `resume_task` require a clean tree; claim also requires matching branch and `HEAD === base_commit`.
+- See `AGENTS.md` §21 for V1 non-goals.
 
 ---
 
 ## Confirmed Invariants
 
-No runtime invariants are enforced yet. There is no product code or test suite.
+These are enforced by code and tests:
 
-Intended V1 rules from confirmed product intent are not duplicated here until they are implemented and tested.
+- `create_task` lands in `READY`; there is no durable `CREATED` state.
+- `claim_task` is the only transition into `RUNNING`.
+- At most one `RUNNING` task exists per ledger.
+- `report_result` / `report_blocked` from `RUNNING` release that slot.
+- `resume_task` reopens `BLOCKED` | `FAILED` | `COMPLETED` to `READY`, clears assignee/result/blocker, and captures current HEAD as `base_commit`.
+- OWNER may `close_task` from `COMPLETED` | `FAILED` | `CANCELLED`.
+- Workers cannot read `READY` tasks; a successful `claim_task` returns the full Task Contract.
+- JUNIOR claims only IMPLEMENTATION; PRINCIPAL claims only DIAGNOSIS.
+- Mutating lifecycle ops are transactional (revision check, status check, row update, event insert).
+- The MCP does not mutate Git state.
 
 ---
 
 ## Known Risks / Transitional State
 
-- Implementation has not started. The V1 proposal is awaiting review.
-- `node:sqlite` is available on the local Node.js 24.13.1 runtime but is still experimental. Native `better-sqlite3` is the stable alternative and would add a Windows native addon.
-- No `.gitignore` exists yet. Implementation must add one before `node_modules` or a local database can appear.
-- No accepted ADRs. A persistence-location or SDK-choice ADR is only warranted if the reviewed design is likely to be reversed later.
-- Sibling MCP trees under `F:\code` remain out of scope unless explicitly adopted.
+- `node:sqlite` is still experimental on Node.js 24.13.1. Isolated behind `store.ts`.
+- SDK input-schema failures (for example extra `branch` on `create_task`) return MCP `isError` text from the SDK, not this server's `{ ok: false, error: { code } }` envelope. Domain errors from lifecycle do return structuredContent.
+- `.gitignore` excludes `node_modules/` and `*.sqlite*`. The live ledger must not be committed.
+- Connected Automations `tasks` MCP remains unrelated.
 
 ---
 
 ## Open Project-Level Questions
 
-- Whether `CREATED` is a real persisted state or `create_task` should land in `READY`.
-- How `FAILED` is entered, given there is no `report_failed` tool.
-- How strict Git baseline checks are on `claim_task` (HEAD mismatch vs dirty working tree).
-- Whether workers may `get_task` by ID before claiming, or only after assignment.
-- SQLite driver: experimental `node:sqlite` vs `better-sqlite3`.
-- How the user-local database is keyed (canonical repo path vs git identity).
+None that block V1 use. Broadening beyond the approved V1 contract requires a new decision.
