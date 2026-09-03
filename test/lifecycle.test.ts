@@ -13,13 +13,16 @@ import {
 import type { Store } from '../src/store.ts';
 import {
   cleanGit,
+  cloneRepo,
   diagnosisPayload,
   diagnosisResult,
   expectDomain,
   implPayload,
   implResult,
+  initGitRepo,
   openTempStore,
   removeDir,
+  snapshot,
 } from './helpers.ts';
 
 const dirs: string[] = [];
@@ -292,5 +295,62 @@ describe('lifecycle', () => {
     );
     const closedFailed = closeTask(db, failed.id, failed.revision);
     expect(closedFailed.status).toBe('CLOSED');
+  });
+
+  it('rejects claim and resume from a different repository with matching branch and HEAD', () => {
+    const repoA = initGitRepo();
+    const repoB = cloneRepo(repoA);
+    dirs.push(repoA, repoB);
+    const gitA = snapshot(repoA);
+    const gitB = snapshot(repoB);
+    expect(gitA.head).toBe(gitB.head);
+    expect(gitA.branch).toBe(gitB.branch);
+    expect(gitA.repoRoot).not.toBe(gitB.repoRoot);
+
+    const db = store();
+    const created = createTask(db, gitA, { type: 'IMPLEMENTATION', payload: implPayload });
+    expect(created.repo_root).toBe(gitA.repoRoot);
+
+    expectDomain(
+      () => claimTask(db, gitB, 'JUNIOR', created.id, created.revision),
+      'REPOSITORY_MISMATCH',
+    );
+    const afterFailedClaim = getTask(db, 'OWNER', created.id);
+    expect(afterFailedClaim.status).toBe('READY');
+    expect(afterFailedClaim.repo_root).toBe(gitA.repoRoot);
+    expect(afterFailedClaim.revision).toBe(created.revision);
+    expect(db.listEvents(created.id).map((event) => event.kind)).toEqual(['created']);
+
+    const claimed = claimTask(db, gitA, 'JUNIOR', created.id, created.revision);
+    expect(claimed.status).toBe('RUNNING');
+    const blocked = reportBlocked(db, 'JUNIOR', {
+      task_id: claimed.id,
+      revision: claimed.revision,
+      blocker: {
+        reason: 'DECISION_REQUIRED',
+        summary: 'Need owner input',
+        need_from_owner: 'Confirm scope',
+        evidence_refs: [],
+      },
+    });
+    const eventsBeforeResume = db.listEvents(blocked.id).length;
+
+    expectDomain(
+      () => resumeTask(db, gitB, { task_id: blocked.id, revision: blocked.revision }),
+      'REPOSITORY_MISMATCH',
+    );
+    const afterFailedResume = getTask(db, 'OWNER', blocked.id);
+    expect(afterFailedResume.status).toBe('BLOCKED');
+    expect(afterFailedResume.revision).toBe(blocked.revision);
+    expect(afterFailedResume.base_commit).toBe(blocked.base_commit);
+    expect(afterFailedResume.result).toEqual(blocked.result);
+    expect(afterFailedResume.blocker).toEqual(blocked.blocker);
+    expect(afterFailedResume.repo_root).toBe(gitA.repoRoot);
+    expect(db.listEvents(blocked.id)).toHaveLength(eventsBeforeResume);
+    expect(db.listEvents(blocked.id).at(-1)?.kind).toBe('blocked');
+
+    const resumed = resumeTask(db, gitA, { task_id: blocked.id, revision: blocked.revision });
+    expect(resumed.status).toBe('READY');
+    expect(resumed.repo_root).toBe(gitA.repoRoot);
   });
 });

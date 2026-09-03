@@ -42,6 +42,7 @@ These are enforced by code and tests:
 - JUNIOR claims only IMPLEMENTATION; PRINCIPAL claims only DIAGNOSIS.
 - Mutating lifecycle ops are transactional (revision check, status check, row update, event insert).
 - The MCP does not mutate Git state.
+- A task remains bound to the canonical `repo_root` captured at create. `claim_task` and `resume_task` reject a process bound to a different repository even when branch and HEAD match.
 
 ---
 

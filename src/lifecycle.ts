@@ -159,7 +159,11 @@ export function claimTask(
         { role: actor, type: task.type },
       );
     }
-    requireClaimBaseline(git, { branch: task.branch, base_commit: task.base_commit });
+    requireClaimBaseline(git, {
+      repo_root: task.repo_root,
+      branch: task.branch,
+      base_commit: task.base_commit,
+    });
     const running = store.getRunning();
     if (running) {
       throw new DomainError(
@@ -277,7 +281,8 @@ export function resumeTask(
   git: GitSnapshot,
   input: ResumeTaskInput,
 ): TaskContract {
-  requireResumeBaseline(git, requireTask(store, input.task_id).branch);
+  const existing = requireTask(store, input.task_id);
+  requireResumeBaseline(git, { repo_root: existing.repo_root, branch: existing.branch });
   return store.transact(() => {
     const task = requireTask(store, input.task_id);
     requireRevision(task, input.revision);
@@ -288,7 +293,7 @@ export function resumeTask(
         { status: task.status },
       );
     }
-    requireResumeBaseline(git, task.branch);
+    requireResumeBaseline(git, { repo_root: task.repo_root, branch: task.branch });
     const payload = input.payload === undefined ? task.payload : payloadForType(task.type, input.payload);
     const timestamp = nowIso();
     const next: TaskContract = {

@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { DomainError } from '../src/errors.ts';
-import { inspectRepo, requireClaimBaseline, requireCleanBaseline } from '../src/git.ts';
-import { extraCommit, git, initGitRepo, makeDirty, removeDir, snapshot } from './helpers.ts';
+import {
+  inspectRepo,
+  requireClaimBaseline,
+  requireCleanBaseline,
+  requireResumeBaseline,
+} from '../src/git.ts';
+import { cloneRepo, extraCommit, git, initGitRepo, makeDirty, removeDir, snapshot } from './helpers.ts';
 
 const dirs: string[] = [];
 
@@ -47,7 +52,11 @@ describe('git baseline', () => {
     extraCommit(repo);
     const moved = snapshot(repo);
     try {
-      requireClaimBaseline(moved, { branch: original.branch, base_commit: original.head });
+      requireClaimBaseline(moved, {
+        repo_root: original.repoRoot,
+        branch: original.branch,
+        base_commit: original.head,
+      });
       expect.fail('expected HEAD_MISMATCH');
     } catch (error) {
       expect((error as DomainError).code).toBe('HEAD_MISMATCH');
@@ -55,7 +64,11 @@ describe('git baseline', () => {
     git(repo, ['checkout', '-b', 'other']);
     const branched = snapshot(repo);
     try {
-      requireClaimBaseline(branched, { branch: original.branch, base_commit: moved.head });
+      requireClaimBaseline(branched, {
+        repo_root: original.repoRoot,
+        branch: original.branch,
+        base_commit: moved.head,
+      });
       expect.fail('expected BRANCH_MISMATCH');
     } catch (error) {
       expect((error as DomainError).code).toBe('BRANCH_MISMATCH');
@@ -66,5 +79,32 @@ describe('git baseline', () => {
     const repo = initGitRepo();
     dirs.push(repo);
     expect(() => inspectRepo(repo + '-missing')).toThrow(DomainError);
+  });
+
+  it('rejects claim and resume baselines when the canonical repository root differs', () => {
+    const repoA = initGitRepo();
+    const repoB = cloneRepo(repoA);
+    dirs.push(repoA, repoB);
+    const gitA = snapshot(repoA);
+    const gitB = snapshot(repoB);
+    expect(gitA.head).toBe(gitB.head);
+    expect(gitA.branch).toBe(gitB.branch);
+    expect(gitA.repoRoot).not.toBe(gitB.repoRoot);
+    try {
+      requireClaimBaseline(gitB, {
+        repo_root: gitA.repoRoot,
+        branch: gitA.branch,
+        base_commit: gitA.head,
+      });
+      expect.fail('expected REPOSITORY_MISMATCH');
+    } catch (error) {
+      expect((error as DomainError).code).toBe('REPOSITORY_MISMATCH');
+    }
+    try {
+      requireResumeBaseline(gitB, { repo_root: gitA.repoRoot, branch: gitA.branch });
+      expect.fail('expected REPOSITORY_MISMATCH');
+    } catch (error) {
+      expect((error as DomainError).code).toBe('REPOSITORY_MISMATCH');
+    }
   });
 });

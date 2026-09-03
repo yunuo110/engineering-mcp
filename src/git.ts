@@ -57,10 +57,21 @@ export function requireCleanBaseline(git: GitSnapshot): void {
   }
 }
 
+function requireSameRepository(git: GitSnapshot, expectedRoot: string): void {
+  if (git.repoRoot !== expectedRoot) {
+    throw new DomainError(
+      'REPOSITORY_MISMATCH',
+      `Expected repository ${expectedRoot}, found ${git.repoRoot}`,
+      { expected: expectedRoot, actual: git.repoRoot },
+    );
+  }
+}
+
 export function requireClaimBaseline(
   git: GitSnapshot,
-  expected: { branch: string; base_commit: string },
+  expected: { repo_root: string; branch: string; base_commit: string },
 ): void {
+  requireSameRepository(git, expected.repo_root);
   requireCleanBaseline(git);
   if (git.branch !== expected.branch) {
     throw new DomainError(
@@ -78,13 +89,17 @@ export function requireClaimBaseline(
   }
 }
 
-export function requireResumeBaseline(git: GitSnapshot, expectedBranch: string): void {
+export function requireResumeBaseline(
+  git: GitSnapshot,
+  expected: { repo_root: string; branch: string },
+): void {
+  requireSameRepository(git, expected.repo_root);
   requireCleanBaseline(git);
-  if (git.branch !== expectedBranch) {
+  if (git.branch !== expected.branch) {
     throw new DomainError(
       'BRANCH_MISMATCH',
-      `Expected branch ${expectedBranch}, found ${git.branch}`,
-      { expected: expectedBranch, actual: git.branch },
+      `Expected branch ${expected.branch}, found ${git.branch}`,
+      { expected: expected.branch, actual: git.branch },
     );
   }
 }

@@ -199,4 +199,15 @@ export function extraCommit(repo: string, name = 'next.txt'): void {
   git(repo, ['commit', '-m', name]);
 }
 
+export function cloneRepo(source: string): string {
+  const dir = tempDir('eng-mcp-clone-');
+  execFileSync('git', ['clone', source, dir], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  git(dir, ['config', 'user.email', 'test@example.com']);
+  git(dir, ['config', 'user.name', 'Test']);
+  git(dir, ['config', 'commit.gpgsign', 'false']);
+  return dir;
+}
 
