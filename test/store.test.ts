@@ -646,4 +646,23 @@ describe('Store', () => {
     expect(openError).toBeInstanceOf(DomainError);
     expect((openError as DomainError).code).toBe('REPOSITORY_BINDING_MISMATCH');
   });
+
+  it('fails closed when a required fencing trigger is missing', () => {
+    const opened = openTempStore('repo-a');
+    dirs.push(opened.dir);
+    opened.store.close();
+    const path = opened.store.path;
+    const raw = new DatabaseSync(path);
+    raw.exec('DROP TRIGGER IF EXISTS trg_tasks_repository_invariant_update');
+    raw.close();
+
+    let openError: unknown;
+    try {
+      Store.open(path, { repoRoot: 'repo-a' });
+    } catch (error) {
+      openError = error;
+    }
+    expect(openError).toBeInstanceOf(DomainError);
+    expect((openError as DomainError).code).toBe('SCHEMA_FENCING_MISSING');
+  });
 });
