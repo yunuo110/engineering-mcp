@@ -113,6 +113,7 @@ export function createTask(
     owner_role: 'OWNER',
     assignee_role: null,
     execution_instance_id: null,
+    writer_generation: 1,
     repo_root: git.repoRoot,
     base_commit: git.head,
     branch: git.branch,
@@ -197,6 +198,7 @@ export function claimTask(
     const timestamp = nowIso();
     const next: TaskContract = {
       ...task,
+      writer_generation: task.writer_generation + 1,
       status: 'RUNNING',
       assignee_role: actor === 'JUNIOR' ? 'JUNIOR' : 'PRINCIPAL',
       execution_instance_id: executionInstanceId,
@@ -264,6 +266,7 @@ export function claimNextTask(
     const timestamp = nowIso();
     const next: TaskContract = {
       ...task,
+      writer_generation: task.writer_generation + 1,
       status: 'RUNNING',
       assignee_role: actor === 'JUNIOR' ? 'JUNIOR' : 'PRINCIPAL',
       execution_instance_id: executionInstanceId,
@@ -307,6 +310,7 @@ export function reportResult(
     const nextStatus: TaskStatus = input.outcome === 'completed' ? 'COMPLETED' : 'FAILED';
     const next: TaskContract = {
       ...task,
+      writer_generation: task.writer_generation + 1,
       status: nextStatus,
       execution_instance_id: null,
       result,
@@ -349,6 +353,7 @@ export function reportBlocked(
     const timestamp = nowIso();
     const next: TaskContract = {
       ...task,
+      writer_generation: task.writer_generation + 1,
       status: 'BLOCKED',
       execution_instance_id: null,
       blocker: input.blocker,
@@ -404,6 +409,7 @@ export function recoverTask(
     };
     const next: TaskContract = {
       ...task,
+      writer_generation: task.writer_generation + 1,
       status: 'BLOCKED',
       execution_instance_id: null,
       blocker,
@@ -451,6 +457,7 @@ export function resumeTask(
     const timestamp = nowIso();
     const next: TaskContract = {
       ...task,
+      writer_generation: task.writer_generation + 1,
       status: 'READY',
       assignee_role: null,
       execution_instance_id: null,
@@ -502,6 +509,7 @@ export function cancelTask(
     const timestamp = nowIso();
     const next: TaskContract = {
       ...task,
+      writer_generation: task.writer_generation + 1,
       status: 'CANCELLED',
       execution_instance_id: null,
       revision: task.revision + 1,
@@ -541,6 +549,7 @@ export function closeTask(
     const timestamp = nowIso();
     const next: TaskContract = {
       ...task,
+      writer_generation: task.writer_generation + 1,
       status: 'CLOSED',
       execution_instance_id: null,
       revision: task.revision + 1,

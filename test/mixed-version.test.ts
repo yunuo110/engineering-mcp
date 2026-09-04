@@ -224,7 +224,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
       arguments: { task_id: createdTask.id, revision: createdTask.revision },
     });
     expect(claimAttempt.isError).toBe(true);
-    expect(taskText(claimAttempt)).toContain('EXECUTION_STATE_INVARIANT_VIOLATION');
+    expect(taskText(claimAttempt)).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
 
     const current = Store.open(dbPath, { repoRoot: repo });
     const after = current.getTask(createdTask.id);
@@ -262,6 +262,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
         status: 'RUNNING' as const,
         assignee_role: 'JUNIOR' as const,
         execution_instance_id: 'v152-owner',
+        writer_generation: task.writer_generation + 1,
         revision: task.revision + 1,
       };
       current.updateTask(next);
@@ -279,7 +280,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
       },
     });
     expect(reportResultAttempt.isError).toBe(true);
-    expect(taskText(reportResultAttempt)).toContain('EXECUTION_STATE_INVARIANT_VIOLATION');
+    expect(taskText(reportResultAttempt)).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
 
     const reportBlockedAttempt = await legacyJunior.client.callTool({
       name: 'report_blocked',
@@ -295,7 +296,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
       },
     });
     expect(reportBlockedAttempt.isError).toBe(true);
-    expect(taskText(reportBlockedAttempt)).toContain('EXECUTION_STATE_INVARIANT_VIOLATION');
+    expect(taskText(reportBlockedAttempt)).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
 
     const after = current.getTask(createdTask.id);
     expect(after?.status).toBe('RUNNING');
@@ -308,6 +309,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
         ...task,
         status: 'COMPLETED' as const,
         execution_instance_id: null,
+        writer_generation: task.writer_generation + 1,
         result: implResult,
         revision: task.revision + 1,
       };
@@ -379,7 +381,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
       arguments: { type: 'IMPLEMENTATION', payload: implPayload },
     });
     expect(createByB.isError).toBe(true);
-    expect(taskText(createByB)).toContain('REPOSITORY_BINDING_MISMATCH');
+    expect(taskText(createByB)).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
 
     const current = Store.open(dbPath, { repoRoot: repoA });
     const active = current.listActive();
@@ -418,6 +420,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
         status: 'RUNNING' as const,
         assignee_role: 'JUNIOR' as const,
         execution_instance_id: 'v153-owner',
+        writer_generation: task.writer_generation + 1,
         revision: task.revision + 1,
       };
       current.updateTask(next);
@@ -435,7 +438,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
       },
     });
     expect(result.ok).toBe(false);
-    expect(result.error).toContain('EXECUTION_STATE_INVARIANT_VIOLATION');
+    expect(result.error).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
 
     const after = current.getTask(createdTask.id);
     expect(after?.status).toBe('RUNNING');
@@ -443,6 +446,156 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
     expect(after?.base_commit).toBe(ready?.base_commit);
     expect(after?.execution_instance_id).toBe('v153-owner');
     expect(after?.revision).toBe(running.revision);
+    current.close();
+  });
+
+  it('rejects same-repository legacy create_task after migration', async () => {
+    const repo = initGitRepo();
+    const dbDir = tempDir('eng-mcp-v154-same-create-');
+    const dbPath = join(dbDir, 'ledger.sqlite');
+    dirs.push(repo, dbDir);
+    const legacySrc = materializeLegacyV1();
+
+    const legacyOwner = await connectLegacyStdio('owner', repo, dbPath, legacySrc);
+    closers.push(legacyOwner.close);
+    const created = await legacyOwner.client.callTool({
+      name: 'create_task',
+      arguments: { type: 'IMPLEMENTATION', payload: implPayload },
+    });
+    expect(created.isError).toBeFalsy();
+
+    const migrated = Store.open(dbPath, { repoRoot: repo });
+    migrated.close();
+
+    const createAfterMigration = await legacyOwner.client.callTool({
+      name: 'create_task',
+      arguments: { type: 'IMPLEMENTATION', payload: implPayload },
+    });
+    expect(createAfterMigration.isError).toBe(true);
+    expect(taskText(createAfterMigration)).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
+
+    const current = Store.open(dbPath, { repoRoot: repo });
+    expect(current.listActive()).toHaveLength(1);
+    current.close();
+  });
+
+  it('rejects the exact legacy foreign cancel_task blocker after migration', async () => {
+    const repoA = initGitRepo();
+    const repoB = initGitRepo();
+    const dbDir = tempDir('eng-mcp-v154-cancel-');
+    const dbPath = join(dbDir, 'ledger.sqlite');
+    dirs.push(repoA, repoB, dbDir);
+    const legacySrc = materializeLegacyV1();
+
+    const legacyOwnerA = await connectLegacyStdio('owner', repoA, dbPath, legacySrc);
+    closers.push(legacyOwnerA.close);
+    const legacyOwnerB = await connectLegacyStdio('owner', repoB, dbPath, legacySrc);
+    closers.push(legacyOwnerB.close);
+
+    const created = await legacyOwnerA.client.callTool({
+      name: 'create_task',
+      arguments: { type: 'IMPLEMENTATION', payload: implPayload },
+    });
+    const task = structured(created).task as { id: string; revision: number };
+
+    const migrated = Store.open(dbPath, { repoRoot: repoA });
+    migrated.close();
+
+    const cancelAttempt = await legacyOwnerB.client.callTool({
+      name: 'cancel_task',
+      arguments: { task_id: task.id, revision: task.revision },
+    });
+    expect(cancelAttempt.isError).toBe(true);
+    expect(taskText(cancelAttempt)).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
+
+    const current = Store.open(dbPath, { repoRoot: repoA });
+    const after = current.getTask(task.id);
+    expect(after?.status).toBe('READY');
+    expect(after?.revision).toBe(task.revision);
+    current.close();
+  });
+
+  it('rejects eligible legacy close_task and resume_task after migration', async () => {
+    const repoA = initGitRepo();
+    const repoB = initGitRepo();
+    const dbDir = tempDir('eng-mcp-v154-close-resume-');
+    const dbPath = join(dbDir, 'ledger.sqlite');
+    dirs.push(repoA, repoB, dbDir);
+    const legacySrc = materializeLegacyV1();
+
+    const legacyOwnerA = await connectLegacyStdio('owner', repoA, dbPath, legacySrc);
+    closers.push(legacyOwnerA.close);
+    const legacyJuniorA = await connectLegacyStdio('junior', repoA, dbPath, legacySrc);
+    closers.push(legacyJuniorA.close);
+    const legacyOwnerB = await connectLegacyStdio('owner', repoB, dbPath, legacySrc);
+    closers.push(legacyOwnerB.close);
+
+    const createdCompleted = await legacyOwnerA.client.callTool({
+      name: 'create_task',
+      arguments: { type: 'IMPLEMENTATION', payload: implPayload },
+    });
+    const completedTask = structured(createdCompleted).task as { id: string; revision: number };
+    const claimedCompleted = await legacyJuniorA.client.callTool({
+      name: 'claim_task',
+      arguments: { task_id: completedTask.id, revision: completedTask.revision },
+    });
+    const claimedCompletedTask = structured(claimedCompleted).task as { id: string; revision: number };
+    const reported = await legacyJuniorA.client.callTool({
+      name: 'report_result',
+      arguments: {
+        task_id: claimedCompletedTask.id,
+        revision: claimedCompletedTask.revision,
+        outcome: 'completed',
+        result: implResult,
+      },
+    });
+    const completed = structured(reported).task as { id: string; revision: number };
+
+    const createdBlocked = await legacyOwnerA.client.callTool({
+      name: 'create_task',
+      arguments: { type: 'IMPLEMENTATION', payload: implPayload },
+    });
+    const blockedTask = structured(createdBlocked).task as { id: string; revision: number };
+    const claimedBlocked = await legacyJuniorA.client.callTool({
+      name: 'claim_task',
+      arguments: { task_id: blockedTask.id, revision: blockedTask.revision },
+    });
+    const claimedBlockedTask = structured(claimedBlocked).task as { id: string; revision: number };
+    const blocked = await legacyJuniorA.client.callTool({
+      name: 'report_blocked',
+      arguments: {
+        task_id: claimedBlockedTask.id,
+        revision: claimedBlockedTask.revision,
+        blocker: {
+          reason: 'DECISION_REQUIRED',
+          summary: 'pre-migration blocked',
+          need_from_owner: 'review',
+          evidence_refs: [],
+        },
+      },
+    });
+    const blockedTaskFinal = structured(blocked).task as { id: string; revision: number };
+
+    const migrated = Store.open(dbPath, { repoRoot: repoA });
+    migrated.close();
+
+    const closeAttempt = await legacyOwnerB.client.callTool({
+      name: 'close_task',
+      arguments: { task_id: completed.id, revision: completed.revision },
+    });
+    expect(closeAttempt.isError).toBe(true);
+    expect(taskText(closeAttempt)).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
+
+    const resumeAttempt = await legacyOwnerA.client.callTool({
+      name: 'resume_task',
+      arguments: { task_id: blockedTaskFinal.id, revision: blockedTaskFinal.revision },
+    });
+    expect(resumeAttempt.isError).toBe(true);
+    expect(taskText(resumeAttempt)).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
+
+    const current = Store.open(dbPath, { repoRoot: repoA });
+    expect(current.getTask(completed.id)?.status).toBe('COMPLETED');
+    expect(current.getTask(blockedTaskFinal.id)?.status).toBe('BLOCKED');
     current.close();
   });
 });

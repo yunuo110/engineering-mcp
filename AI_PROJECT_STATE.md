@@ -4,15 +4,15 @@
 
 **Goal**
 
-Engineering MCP V1.5.3 is a local stdio coordination ledger with a persistent FIFO queue, explicit execution ownership, and fail-closed manual recovery.
+Engineering MCP V1.5.4 is a local stdio coordination ledger with a persistent FIFO queue, explicit execution ownership, and fail-closed manual recovery.
 
 **Status**
 
-V1.5.3 is implemented: server startup is execution-state side-effect free, RUNNING tasks are owned by specific server execution instances, SQLite triggers enforce execution ownership against legacy writers, migration refuses legacy RUNNING state, explicit OWNER recovery is revision-protected and repository-bound, and each ledger is bound to one canonical repository.
+V1.5.4 is implemented: server startup is execution-state side-effect free, RUNNING tasks are owned by specific server execution instances, SQLite triggers enforce execution ownership against legacy writers, migration refuses legacy RUNNING state, explicit OWNER recovery is revision-protected and repository-bound, and each ledger is bound to one canonical repository.
 
 **Next**
 
-Independent acceptance review of V1.5.3. Do not add heartbeat/lease, automatic recovery, or worker supervision yet.
+Independent acceptance review of V1.5.4. Do not add heartbeat/lease, automatic recovery, or worker supervision yet.
 
 ---
 
@@ -21,17 +21,18 @@ Independent acceptance review of V1.5.3. Do not add heartbeat/lease, automatic r
 - Launch: `node src/index.ts --role owner|junior|principal --repo <target> [--db <path>]`. Role is process identity, not a tool argument.
 - Each MCP server process generates a cryptographically random `execution_instance_id` that lives for the process/instance lifetime.
 - Transport: local stdio via `@modelcontextprotocol/server` v2 `serveStdio`.
-- Persistence: `node:sqlite` (`DatabaseSync`) with WAL, foreign keys, 5s busy timeout, and `user_version = 4`.
+- Persistence: `node:sqlite` (`DatabaseSync`) with WAL, foreign keys, 5s busy timeout, and `user_version = 5`.
 - Tables: `tasks` (authoritative), `task_events` (audit only), and `ledger_metadata` (repository binding).
 - SQLite triggers enforce the execution-state invariant: `RUNNING` must have `execution_instance_id`, and non-`RUNNING` must not have one.
-- SQLite triggers also enforce `task.repo_root == ledger_metadata.repository_root` and reject arbitrary `RUNNING → RUNNING` task mutations.
+- SQLite triggers also enforce `task.repo_root == ledger_metadata.repository_root`, reject arbitrary `RUNNING → RUNNING` task mutations, and require every current task write to carry/advance a `writer_generation`.
+- After migration, legacy V1 connections cannot INSERT or UPDATE tasks; reads remain governed by existing permissions.
 - A ledger is bound to exactly one canonical repository. Opening a ledger from a different repository fails closed.
 - Tasks include `assignee_role` (authorization/assignment) and `execution_instance_id` (active execution ownership).
 - `claim_task` / `claim_next_task` atomically transition `READY → RUNNING` and store the claiming server instance as execution owner.
 - Server startup never recovers RUNNING tasks. A stale RUNNING task remains RUNNING until an OWNER explicitly calls `recover_task`.
 - `recover_task` is OWNER-only, task-specific, revision-protected, repository-bound, and transitions `RUNNING → BLOCKED` while clearing execution ownership.
 - Git access is read-only (`rev-parse`, `status --porcelain=v1`). `create_task` / `claim_task` / `claim_next_task` / `resume_task` require a clean tree; claims also require matching branch and `HEAD === base_commit`.
-- Retry/requeue remains explicit through owner `resume_task`; V1.5.3 does not automatically retry.
+- Retry/requeue remains explicit through owner `resume_task`; V1.5.4 does not automatically retry.
 
 ---
 
@@ -63,12 +64,12 @@ These are enforced by code and tests:
 - SDK input-schema failures (for example extra `branch` on `create_task`) return MCP `isError` text from the SDK, not this server's `{ ok: false, error: { code } }` envelope. Domain errors from lifecycle do return structuredContent.
 - `.gitignore` excludes `node_modules/` and `*.sqlite*`. The live ledger must not be committed.
 - Connected Automations `tasks` MCP remains unrelated.
-- If a worker crashes, its task remains RUNNING until an OWNER explicitly recovers it. This is intentional fail-closed behavior; V1.5.3 does not infer worker death from startup.
-- V1/V1.5.1/V1.5.2 databases are migrated to schema version 4 by adding `execution_instance_id`, `ledger_metadata`, execution-fencing triggers, repository-fencing triggers, and RUNNING-mutation fencing without destructive resets.
+- If a worker crashes, its task remains RUNNING until an OWNER explicitly recovers it. This is intentional fail-closed behavior; V1.5.4 does not infer worker death from startup.
+- V1/V1.5.1/V1.5.2/V1.5.3 databases are migrated to schema version 5 by adding `execution_instance_id`, `writer_generation`, `ledger_metadata`, execution-fencing triggers, repository-fencing triggers, RUNNING-mutation fencing, and writer-protocol fencing without destructive resets.
 - If a legacy DB contains a `RUNNING` task, migration fails closed with `LEGACY_RUNNING_TASK_PREVENTS_MIGRATION`.
 
 ---
 
 ## Open Project-Level Questions
 
-None that block V1.5.3 use. Automatic dead-worker detection requires future heartbeat/lease/fencing support and remains out of scope.
+None that block V1.5.4 use. Automatic dead-worker detection requires future heartbeat/lease/fencing support and remains out of scope.

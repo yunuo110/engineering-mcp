@@ -11,7 +11,7 @@ export function createEngineeringServer(config: ServerConfig): McpServer {
       capabilities: {
         tools: {},
       },
-      instructions: `Engineering MCP V1.5.3 coordination ledger. Process role: ${config.processRole}. Role is launch identity, not a tool argument.`,
+      instructions: `Engineering MCP V1.5.4 coordination ledger. Process role: ${config.processRole}. Role is launch identity, not a tool argument.`,
     },
   );
   registerRoleTools(server, config);

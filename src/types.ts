@@ -1,6 +1,6 @@
 import { z } from 'zod/v4';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 export const BUSY_TIMEOUT_MS = 5000;
 
 export const ROLES = ['OWNER', 'JUNIOR', 'PRINCIPAL'] as const;
@@ -188,6 +188,7 @@ export const taskContractSchema = z.object({
   owner_role: z.literal('OWNER'),
   assignee_role: assigneeRoleSchema.nullable(),
   execution_instance_id: z.string().nullable(),
+  writer_generation: z.number().int().nonnegative(),
   repo_root: z.string().min(1),
   base_commit: z.string().min(1),
   branch: z.string().min(1),

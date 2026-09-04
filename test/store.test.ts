@@ -26,6 +26,7 @@ function sampleTask(overrides: Partial<TaskContract> = {}): TaskContract {
     owner_role: 'OWNER',
     assignee_role: null,
     execution_instance_id: null,
+    writer_generation: 1,
     repo_root: 'C:\\repo',
     base_commit: 'aaa',
     branch: 'master',
@@ -329,6 +330,7 @@ describe('Store', () => {
         ...task,
         status: 'COMPLETED',
         execution_instance_id: 'current-owner',
+        writer_generation: task.writer_generation + 1,
         revision: 2,
       }),
     ).toThrow(/EXECUTION_STATE_INVARIANT_VIOLATION/);
@@ -348,6 +350,7 @@ describe('Store', () => {
       status: 'RUNNING' as const,
       assignee_role: 'JUNIOR' as const,
       execution_instance_id: 'current-owner',
+      writer_generation: ready.writer_generation + 1,
       revision: 2,
     };
     opened.store.updateTask(running);
@@ -358,6 +361,7 @@ describe('Store', () => {
       ...running,
       status: 'COMPLETED' as const,
       execution_instance_id: null,
+      writer_generation: running.writer_generation + 1,
       result: null,
       revision: 3,
     };
@@ -455,6 +459,7 @@ describe('Store', () => {
       opened.store.updateTask({
         ...task,
         repo_root: 'repo-b',
+        writer_generation: task.writer_generation + 1,
         revision: 2,
       }),
     ).toThrow(/REPOSITORY_BINDING_MISMATCH/);
@@ -480,6 +485,7 @@ describe('Store', () => {
         ...task,
         assignee_role: 'PRINCIPAL',
         base_commit: 'changed',
+        writer_generation: task.writer_generation + 1,
         revision: 3,
       }),
     ).toThrow(/EXECUTION_STATE_INVARIANT_VIOLATION/);
@@ -664,5 +670,61 @@ describe('Store', () => {
     }
     expect(openError).toBeInstanceOf(DomainError);
     expect((openError as DomainError).code).toBe('SCHEMA_FENCING_MISSING');
+  });
+
+  it('rejects a legacy INSERT that omits writer_generation at the database layer', () => {
+    const opened = openTempStore('repo-a');
+    dirs.push(opened.dir);
+    opened.store.close();
+    const path = opened.store.path;
+    const raw = new DatabaseSync(path);
+    expect(() =>
+      raw.prepare(`
+        INSERT INTO tasks (
+          id, type, status, owner_role, assignee_role, execution_instance_id,
+          repo_root, base_commit, branch, payload_json, result_json, blocker_json,
+          revision, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        'legacy-insert',
+        'IMPLEMENTATION',
+        'READY',
+        'OWNER',
+        null,
+        null,
+        'repo-a',
+        'aaa',
+        'main',
+        JSON.stringify(implPayload),
+        null,
+        null,
+        1,
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-01T00:00:00.000Z',
+      ),
+    ).toThrow(/CURRENT_PROTOCOL_WRITER_REQUIRED/);
+    raw.close();
+    const verify = Store.open(path, { repoRoot: 'repo-a' });
+    expect(verify.getTask('legacy-insert')).toBeUndefined();
+    verify.close();
+  });
+
+  it('rejects a legacy UPDATE that omits writer_generation at the database layer', () => {
+    const opened = openTempStore('repo-a');
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    const task = sampleTask({ id: 'legacy-update-target', repo_root: 'repo-a' });
+    opened.store.insertTask(task);
+    const path = opened.store.path;
+    opened.store.close();
+    const raw = new DatabaseSync(path);
+    expect(() =>
+      raw.prepare(`UPDATE tasks SET status = 'CANCELLED', revision = 2 WHERE id = ?`).run(task.id),
+    ).toThrow(/CURRENT_PROTOCOL_WRITER_REQUIRED/);
+    raw.close();
+    const verify = Store.open(path, { repoRoot: 'repo-a' });
+    expect(verify.getTask(task.id)?.status).toBe('READY');
+    expect(verify.getTask(task.id)?.revision).toBe(task.revision);
+    verify.close();
   });
 });

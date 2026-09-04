@@ -28,6 +28,7 @@ CREATE TABLE tasks (
   owner_role TEXT NOT NULL,
   assignee_role TEXT,
   execution_instance_id TEXT,
+  writer_generation INTEGER,
   repo_root TEXT NOT NULL,
   base_commit TEXT NOT NULL,
   branch TEXT NOT NULL,
@@ -103,6 +104,22 @@ WHEN OLD.status = 'RUNNING' AND NEW.status = 'RUNNING'
 BEGIN
   SELECT RAISE(ABORT, 'EXECUTION_STATE_INVARIANT_VIOLATION');
 END;
+
+CREATE TRIGGER trg_tasks_writer_protocol_insert
+BEFORE INSERT ON tasks
+BEGIN
+  SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
+  WHERE NEW.writer_generation IS NULL
+     OR NEW.writer_generation != 1;
+END;
+
+CREATE TRIGGER trg_tasks_writer_protocol_update
+BEFORE UPDATE ON tasks
+BEGIN
+  SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
+  WHERE NEW.writer_generation IS NULL
+     OR NEW.writer_generation != OLD.writer_generation + 1;
+END;
 `;
 
 type TaskRow = {
@@ -112,6 +129,7 @@ type TaskRow = {
   owner_role: string;
   assignee_role: string | null;
   execution_instance_id: string | null;
+  writer_generation: number;
   repo_root: string;
   base_commit: string;
   branch: string;
@@ -177,6 +195,7 @@ function rowToTask(row: TaskRow): TaskContract {
     owner_role: row.owner_role,
     assignee_role: row.assignee_role,
     execution_instance_id: row.execution_instance_id,
+    writer_generation: row.writer_generation,
     repo_root: row.repo_root,
     base_commit: row.base_commit,
     branch: row.branch,
@@ -215,6 +234,8 @@ const REQUIRED_FENCING_TRIGGERS = [
   'trg_tasks_repository_invariant_insert',
   'trg_tasks_repository_invariant_update',
   'trg_tasks_running_immutable_update',
+  'trg_tasks_writer_protocol_insert',
+  'trg_tasks_writer_protocol_update',
 ] as const;
 
 function triggerExists(db: DatabaseSync, name: string): boolean {
@@ -264,6 +285,22 @@ function createAllFencingTriggers(db: DatabaseSync): void {
     BEGIN
       SELECT RAISE(ABORT, 'EXECUTION_STATE_INVARIANT_VIOLATION');
     END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tasks_writer_protocol_insert
+    BEFORE INSERT ON tasks
+    BEGIN
+      SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
+      WHERE NEW.writer_generation IS NULL
+         OR NEW.writer_generation != 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tasks_writer_protocol_update
+    BEFORE UPDATE ON tasks
+    BEGIN
+      SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
+      WHERE NEW.writer_generation IS NULL
+         OR NEW.writer_generation != OLD.writer_generation + 1;
+    END;
   `);
 }
 
@@ -289,6 +326,19 @@ function validateExecutionInvariantRows(db: DatabaseSync): void {
       'EXECUTION_STATE_INVARIANT_VIOLATION',
       'Existing task data violates the execution ownership invariant',
       { non_running_with_owner_count: nonRunningWithOwner.count },
+    );
+  }
+}
+
+function validateWriterGenerationRows(db: DatabaseSync): void {
+  const missing = db
+    .prepare(`SELECT COUNT(*) AS count FROM tasks WHERE writer_generation IS NULL`)
+    .get() as { count: number };
+  if (missing.count > 0) {
+    throw new DomainError(
+      'SCHEMA_FENCING_MISSING',
+      'Existing task rows are missing the current-protocol writer generation',
+      { missing_writer_generation_count: missing.count },
     );
   }
 }
@@ -345,7 +395,7 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
       }
       throw error;
     }
-  } else if (userVersion === 1 || userVersion === 2 || userVersion === 3) {
+  } else if (userVersion === 1 || userVersion === 2 || userVersion === 3 || userVersion === 4) {
     db.exec('BEGIN IMMEDIATE');
     try {
       if (userVersion === 1) {
@@ -392,8 +442,14 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
         );
       }
 
+      if (!columnExists(db, 'tasks', 'writer_generation')) {
+        db.exec('ALTER TABLE tasks ADD COLUMN writer_generation INTEGER');
+      }
+      db.exec(`UPDATE tasks SET writer_generation = 1 WHERE writer_generation IS NULL`);
+
       validateExecutionInvariantRows(db);
       validateTaskRepositoryRoots(db);
+      validateWriterGenerationRows(db);
       createAllFencingTriggers(db);
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       db.exec('COMMIT');
@@ -409,6 +465,7 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
       try {
         requireRepositoryBinding(db, repoRoot);
         validateTaskRepositoryRoots(db);
+        validateWriterGenerationRows(db);
         db.exec('COMMIT');
       } catch (error) {
         if (db.isTransaction) {
@@ -637,9 +694,9 @@ export class Store {
       .prepare(
         `INSERT INTO tasks (
           id, type, status, owner_role, assignee_role, execution_instance_id,
-          repo_root, base_commit, branch, payload_json, result_json, blocker_json,
-          revision, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          writer_generation, repo_root, base_commit, branch, payload_json, result_json,
+          blocker_json, revision, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         task.id,
@@ -648,6 +705,7 @@ export class Store {
         task.owner_role,
         task.assignee_role,
         task.execution_instance_id,
+        task.writer_generation,
         task.repo_root,
         task.base_commit,
         task.branch,
@@ -665,8 +723,8 @@ export class Store {
       .prepare(
         `UPDATE tasks SET
           type = ?, status = ?, owner_role = ?, assignee_role = ?, execution_instance_id = ?,
-          repo_root = ?, base_commit = ?, branch = ?, payload_json = ?, result_json = ?,
-          blocker_json = ?, revision = ?, created_at = ?, updated_at = ?
+          writer_generation = ?, repo_root = ?, base_commit = ?, branch = ?, payload_json = ?,
+          result_json = ?, blocker_json = ?, revision = ?, created_at = ?, updated_at = ?
          WHERE id = ?`,
       )
       .run(
@@ -675,6 +733,7 @@ export class Store {
         task.owner_role,
         task.assignee_role,
         task.execution_instance_id,
+        task.writer_generation,
         task.repo_root,
         task.base_commit,
         task.branch,
