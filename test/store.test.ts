@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { DomainError } from '../src/errors.ts';
 import { Store } from '../src/store.ts';
 import { SCHEMA_VERSION, type TaskContract } from '../src/types.ts';
-import { implPayload, openTempStore, removeDir } from './helpers.ts';
+import { implPayload, openTempStore, removeDir, tempDir } from './helpers.ts';
 
 const dirs: string[] = [];
 const stores: Store[] = [];
@@ -41,7 +41,7 @@ function sampleTask(overrides: Partial<TaskContract> = {}): TaskContract {
 
 describe('Store', () => {
   it('initializes WAL, foreign keys, and schema user_version', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('C:\\repo');
     stores.push(opened.store);
     dirs.push(opened.dir);
     opened.store.close();
@@ -56,7 +56,7 @@ describe('Store', () => {
   });
 
   it('persists a task and its audit event', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('C:\\repo');
     stores.push(opened.store);
     dirs.push(opened.dir);
     const task = sampleTask();
@@ -79,7 +79,7 @@ describe('Store', () => {
   });
 
   it('rolls back a failed transaction atomically', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('C:\\repo');
     stores.push(opened.store);
     dirs.push(opened.dir);
     const task = sampleTask();
@@ -93,7 +93,7 @@ describe('Store', () => {
   });
 
   it('enforces a single RUNNING task', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('C:\\repo');
     stores.push(opened.store);
     dirs.push(opened.dir);
     opened.store.insertTask(sampleTask({ status: 'RUNNING', assignee_role: 'JUNIOR', execution_instance_id: 'instance-a' }));
@@ -111,7 +111,7 @@ describe('Store', () => {
   });
 
   it('rejects an unknown schema user_version', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('C:\\repo');
     stores.push(opened.store);
     dirs.push(opened.dir);
     opened.store.close();
@@ -122,7 +122,7 @@ describe('Store', () => {
   });
 
   it('shares writes across two connections', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('C:\\repo');
     stores.push(opened.store);
     dirs.push(opened.dir);
     const second = Store.open(opened.store.path);
@@ -133,7 +133,7 @@ describe('Store', () => {
   });
 
   it('migrates a V1 database without losing tasks or events', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('C:\\repo');
     dirs.push(opened.dir);
     opened.store.close();
     const path = join(opened.dir, 'v1-ledger.sqlite');
@@ -207,30 +207,81 @@ describe('Store', () => {
   });
 
   it('binds a ledger to one repository and rejects a different repository', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('repo-a');
     dirs.push(opened.dir);
     opened.store.close();
     const path = join(opened.dir, 'ledger.sqlite');
 
     const bound = Store.open(path, { repoRoot: 'repo-a' });
     bound.close();
-    expect(() => Store.open(path, { repoRoot: 'repo-b' })).toThrow(DomainError);
+    let mismatchError: unknown;
     try {
       Store.open(path, { repoRoot: 'repo-b' });
-      expect.fail('expected REPOSITORY_BINDING_MISMATCH');
     } catch (error) {
-      expect((error as DomainError).code).toBe('REPOSITORY_BINDING_MISMATCH');
+      mismatchError = error;
     }
+    expect(mismatchError).toBeInstanceOf(DomainError);
+    expect((mismatchError as DomainError).code).toBe('REPOSITORY_BINDING_MISMATCH');
   });
 
   it('infers repository binding only when existing tasks agree', () => {
-    const opened = openTempStore();
-    dirs.push(opened.dir);
-    opened.store.close();
-    const path = join(opened.dir, 'ledger.sqlite');
-    const unbound = Store.open(path);
-    unbound.insertTask(sampleTask({ id: 'repo-a-task', repo_root: 'repo-a' }));
-    unbound.close();
+    const dir = tempDir('eng-mcp-store-infer-');
+    dirs.push(dir);
+    const path = join(dir, 'ledger.sqlite');
+    const raw = new DatabaseSync(path);
+    raw.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        owner_role TEXT NOT NULL,
+        assignee_role TEXT,
+        repo_root TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        result_json TEXT,
+        blocker_json TEXT,
+        revision INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX one_running_task ON tasks(status) WHERE status = 'RUNNING';
+      CREATE TABLE task_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        at TEXT NOT NULL,
+        actor_role TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        from_status TEXT,
+        to_status TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        detail_json TEXT
+      ) STRICT;
+    `);
+    raw.prepare(`
+      INSERT INTO tasks (
+        id, type, status, owner_role, assignee_role, repo_root, base_commit, branch,
+        payload_json, result_json, blocker_json, revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'repo-a-task',
+      'IMPLEMENTATION',
+      'READY',
+      'OWNER',
+      null,
+      'repo-a',
+      'aaa',
+      'main',
+      JSON.stringify(implPayload),
+      null,
+      null,
+      1,
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-01T00:00:00.000Z',
+    );
+    raw.exec(`PRAGMA user_version = 1`);
+    raw.close();
 
     const bound = Store.open(path, { repoRoot: 'repo-a' });
     expect(bound.repositoryRoot).toBe('repo-a');
@@ -239,7 +290,7 @@ describe('Store', () => {
   });
 
   it('rejects ownerless RUNNING rows at the database layer', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('C:\\repo');
     stores.push(opened.store);
     dirs.push(opened.dir);
     expect(() =>
@@ -248,7 +299,7 @@ describe('Store', () => {
   });
 
   it('rejects non-RUNNING rows that retain an execution owner', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('C:\\repo');
     stores.push(opened.store);
     dirs.push(opened.dir);
     expect(() =>
@@ -264,7 +315,7 @@ describe('Store', () => {
   });
 
   it('rejects a legacy-style update from RUNNING/owner to COMPLETED/owner', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('C:\\repo');
     stores.push(opened.store);
     dirs.push(opened.dir);
     const task = sampleTask({
@@ -287,7 +338,7 @@ describe('Store', () => {
   });
 
   it('accepts valid execution ownership transitions at the database layer', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('C:\\repo');
     stores.push(opened.store);
     dirs.push(opened.dir);
     const ready = sampleTask({ id: 'valid-task' });
@@ -316,7 +367,7 @@ describe('Store', () => {
   });
 
   it('refuses migration when a legacy RUNNING task exists', () => {
-    const opened = openTempStore();
+    const opened = openTempStore('C:\\repo');
     dirs.push(opened.dir);
     opened.store.close();
     const path = join(opened.dir, 'legacy-running.sqlite');
@@ -375,11 +426,224 @@ describe('Store', () => {
     raw.exec(`PRAGMA user_version = 1`);
     raw.close();
 
+    let migrationError: unknown;
     try {
       Store.open(path, { repoRoot: 'repo-a' });
-      expect.fail('expected migration to fail closed');
     } catch (error) {
-      expect((error as DomainError).code).toBe('LEGACY_RUNNING_TASK_PREVENTS_MIGRATION');
+      migrationError = error;
     }
+    expect(migrationError).toBeInstanceOf(DomainError);
+    expect((migrationError as DomainError).code).toBe('LEGACY_RUNNING_TASK_PREVENTS_MIGRATION');
+  });
+
+  it('rejects a foreign-repository task INSERT at the database layer', () => {
+    const opened = openTempStore('repo-a');
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    const foreign = sampleTask({ id: 'foreign-insert', repo_root: 'repo-b' });
+    expect(() => opened.store.insertTask(foreign)).toThrow(/REPOSITORY_BINDING_MISMATCH/);
+    expect(opened.store.getTask(foreign.id)).toBeUndefined();
+  });
+
+  it('rejects a foreign-repository task UPDATE at the database layer', () => {
+    const opened = openTempStore('repo-a');
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    const task = sampleTask({ id: 'repo-a-task', repo_root: 'repo-a' });
+    opened.store.insertTask(task);
+    expect(() =>
+      opened.store.updateTask({
+        ...task,
+        repo_root: 'repo-b',
+        revision: 2,
+      }),
+    ).toThrow(/REPOSITORY_BINDING_MISMATCH/);
+    const after = opened.store.getTask(task.id);
+    expect(after?.repo_root).toBe('repo-a');
+    expect(after?.revision).toBe(task.revision);
+  });
+
+  it('rejects RUNNING to RUNNING task mutation at the database layer', () => {
+    const opened = openTempStore('repo-a');
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    const task = sampleTask({
+      id: 'running-task',
+      repo_root: 'repo-a',
+      status: 'RUNNING',
+      assignee_role: 'JUNIOR',
+      execution_instance_id: 'owner-a',
+    });
+    opened.store.insertTask(task);
+    expect(() =>
+      opened.store.updateTask({
+        ...task,
+        assignee_role: 'PRINCIPAL',
+        base_commit: 'changed',
+        revision: 3,
+      }),
+    ).toThrow(/EXECUTION_STATE_INVARIANT_VIOLATION/);
+    const after = opened.store.getTask(task.id);
+    expect(after?.status).toBe('RUNNING');
+    expect(after?.assignee_role).toBe('JUNIOR');
+    expect(after?.base_commit).toBe('aaa');
+    expect(after?.execution_instance_id).toBe('owner-a');
+    expect(after?.revision).toBe(task.revision);
+  });
+
+  it('upgrades a valid v3 database while preserving repository binding', () => {
+    const dir = tempDir('eng-mcp-store-v3-upgrade-');
+    dirs.push(dir);
+    const path = join(dir, 'ledger.sqlite');
+    const raw = new DatabaseSync(path);
+    raw.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        owner_role TEXT NOT NULL,
+        assignee_role TEXT,
+        execution_instance_id TEXT,
+        repo_root TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        result_json TEXT,
+        blocker_json TEXT,
+        revision INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX one_running_task ON tasks(status) WHERE status = 'RUNNING';
+      CREATE TABLE task_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        at TEXT NOT NULL,
+        actor_role TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        from_status TEXT,
+        to_status TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        detail_json TEXT
+      ) STRICT;
+      CREATE TABLE ledger_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      ) STRICT;
+    `);
+    raw.prepare(`INSERT INTO ledger_metadata (key, value) VALUES ('repository_root', 'repo-a')`).run();
+    raw.prepare(`
+      INSERT INTO tasks (
+        id, type, status, owner_role, assignee_role, execution_instance_id,
+        repo_root, base_commit, branch, payload_json, result_json, blocker_json,
+        revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'v3-task',
+      'IMPLEMENTATION',
+      'READY',
+      'OWNER',
+      null,
+      null,
+      'repo-a',
+      'aaa',
+      'main',
+      JSON.stringify(implPayload),
+      null,
+      null,
+      1,
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-01T00:00:00.000Z',
+    );
+    raw.exec(`PRAGMA user_version = 3`);
+    raw.close();
+
+    const upgraded = Store.open(path, { repoRoot: 'repo-a' });
+    stores.push(upgraded);
+    expect(upgraded.repositoryRoot).toBe('repo-a');
+    expect(upgraded.getTask('v3-task')?.repo_root).toBe('repo-a');
+    const versionRaw = new DatabaseSync(path);
+    const version = Object.values(
+      (versionRaw.prepare('PRAGMA user_version').get() as Record<string, number>),
+    )[0];
+    versionRaw.close();
+    expect(version).toBe(SCHEMA_VERSION);
+  });
+
+  it('refuses to open a v3 database whose existing tasks cross repository roots', () => {
+    const dir = tempDir('eng-mcp-store-v3-inconsistent-');
+    dirs.push(dir);
+    const path = join(dir, 'ledger.sqlite');
+    const raw = new DatabaseSync(path);
+    raw.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        owner_role TEXT NOT NULL,
+        assignee_role TEXT,
+        execution_instance_id TEXT,
+        repo_root TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        result_json TEXT,
+        blocker_json TEXT,
+        revision INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX one_running_task ON tasks(status) WHERE status = 'RUNNING';
+      CREATE TABLE task_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        at TEXT NOT NULL,
+        actor_role TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        from_status TEXT,
+        to_status TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        detail_json TEXT
+      ) STRICT;
+      CREATE TABLE ledger_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      ) STRICT;
+    `);
+    raw.prepare(`INSERT INTO ledger_metadata (key, value) VALUES ('repository_root', 'repo-a')`).run();
+    raw.prepare(`
+      INSERT INTO tasks (
+        id, type, status, owner_role, assignee_role, execution_instance_id,
+        repo_root, base_commit, branch, payload_json, result_json, blocker_json,
+        revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'foreign-v3-task',
+      'IMPLEMENTATION',
+      'READY',
+      'OWNER',
+      null,
+      null,
+      'repo-b',
+      'aaa',
+      'main',
+      JSON.stringify(implPayload),
+      null,
+      null,
+      1,
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-01T00:00:00.000Z',
+    );
+    raw.exec(`PRAGMA user_version = 3`);
+    raw.close();
+
+    let openError: unknown;
+    try {
+      Store.open(path, { repoRoot: 'repo-a' });
+    } catch (error) {
+      openError = error;
+    }
+    expect(openError).toBeInstanceOf(DomainError);
+    expect((openError as DomainError).code).toBe('REPOSITORY_BINDING_MISMATCH');
   });
 });

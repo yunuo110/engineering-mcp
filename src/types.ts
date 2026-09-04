@@ -1,6 +1,6 @@
 import { z } from 'zod/v4';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 export const BUSY_TIMEOUT_MS = 5000;
 
 export const ROLES = ['OWNER', 'JUNIOR', 'PRINCIPAL'] as const;

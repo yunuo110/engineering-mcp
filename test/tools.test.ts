@@ -39,7 +39,7 @@ function structured(result: CallToolResult): Record<string, unknown> {
 async function ownerSession(): Promise<{ repo: string; db: Store; owner: Connected }> {
   const repo = initGitRepo();
   dirs.push(repo);
-  const opened = openTempStore();
+  const opened = openTempStore(repo);
   stores.push(opened.store);
   dirs.push(opened.dir);
   const owner = await connectInProcess('owner', repo, opened.store);
@@ -65,7 +65,7 @@ describe('role-filtered tools', () => {
   it('registers only worker tools on junior and principal processes', async () => {
     const repo = initGitRepo();
     dirs.push(repo);
-    const opened = openTempStore();
+    const opened = openTempStore(repo);
     stores.push(opened.store);
     dirs.push(opened.dir);
     const junior = await connectInProcess('junior', repo, opened.store);
@@ -183,7 +183,7 @@ describe('role-filtered tools', () => {
   it('does not auto-recover a RUNNING task when an owner server starts', async () => {
     const repo = initGitRepo();
     dirs.push(repo);
-    const opened = openTempStore();
+    const opened = openTempStore(repo);
     stores.push(opened.store);
     dirs.push(opened.dir);
     const git = snapshot(repo);
@@ -215,7 +215,7 @@ describe('role-filtered tools', () => {
   it('does not auto-recover a RUNNING task when a junior server starts', async () => {
     const repo = initGitRepo();
     dirs.push(repo);
-    const opened = openTempStore();
+    const opened = openTempStore(repo);
     stores.push(opened.store);
     dirs.push(opened.dir);
     const git = snapshot(repo);

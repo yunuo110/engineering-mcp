@@ -111,9 +111,9 @@ export function initGitRepo(): string {
   return dir;
 }
 
-export function openTempStore(): { store: Store; dir: string } {
+export function openTempStore(repoRoot?: string): { store: Store; dir: string } {
   const dir = tempDir('eng-mcp-db-');
-  const store = Store.open(join(dir, 'ledger.sqlite'));
+  const store = Store.open(join(dir, 'ledger.sqlite'), repoRoot === undefined ? undefined : { repoRoot });
   return { store, dir };
 }
 

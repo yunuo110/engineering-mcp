@@ -1,5 +1,7 @@
 # Engineering MCP V1.5.2 — Legacy Writer Fencing & Migration Hardening Report
 
+> **Superseded/corrected by V1_5_3_REPORT.md.** V1.5.3 adds SQLite repository-binding triggers and RUNNING → RUNNING mutation fencing that were not yet present in V1.5.2.
+
 ## A. What changed
 
 Implemented the V1.5.2 safety patch:

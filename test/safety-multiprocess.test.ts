@@ -280,12 +280,13 @@ describe('V1.5.1 multi-process execution ownership', () => {
     const owner = await createOwner(repoA, dbPath);
     await ownerCreate(repoA, dbPath, owner);
 
+    let rejection: unknown;
     try {
       const bad = await connectStdio('junior', repoB, dbPath);
       await bad.close();
-      expect.fail('expected cross-repository ledger open to fail');
-    } catch {
-      // The stdio server process exits at startup and the client connection closes.
+    } catch (error) {
+      rejection = error;
     }
+    expect(rejection).toBeTruthy();
   });
 });

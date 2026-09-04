@@ -40,7 +40,7 @@ afterEach(() => {
 });
 
 function store(): Store {
-  const opened = openTempStore();
+  const opened = openTempStore('C:\\repo');
   stores.push(opened.store);
   dirs.push(opened.dir);
   return opened.store;
@@ -313,7 +313,10 @@ describe('lifecycle', () => {
     expect(gitA.branch).toBe(gitB.branch);
     expect(gitA.repoRoot).not.toBe(gitB.repoRoot);
 
-    const db = store();
+    const opened = openTempStore(gitA.repoRoot);
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    const db = opened.store;
     const created = createTask(db, gitA, { type: 'IMPLEMENTATION', payload: implPayload });
     expect(created.repo_root).toBe(gitA.repoRoot);
 

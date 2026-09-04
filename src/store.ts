@@ -80,6 +80,29 @@ BEGIN
   WHERE (NEW.status = 'RUNNING' AND NEW.execution_instance_id IS NULL)
      OR (NEW.status != 'RUNNING' AND NEW.execution_instance_id IS NOT NULL);
 END;
+
+CREATE TRIGGER trg_tasks_repository_invariant_insert
+BEFORE INSERT ON tasks
+BEGIN
+  SELECT RAISE(ABORT, 'REPOSITORY_BINDING_MISMATCH')
+  WHERE NOT EXISTS (SELECT 1 FROM ledger_metadata WHERE key = 'repository_root')
+     OR NEW.repo_root != (SELECT value FROM ledger_metadata WHERE key = 'repository_root');
+END;
+
+CREATE TRIGGER trg_tasks_repository_invariant_update
+BEFORE UPDATE ON tasks
+BEGIN
+  SELECT RAISE(ABORT, 'REPOSITORY_BINDING_MISMATCH')
+  WHERE NOT EXISTS (SELECT 1 FROM ledger_metadata WHERE key = 'repository_root')
+     OR NEW.repo_root != (SELECT value FROM ledger_metadata WHERE key = 'repository_root');
+END;
+
+CREATE TRIGGER trg_tasks_running_immutable_update
+BEFORE UPDATE ON tasks
+WHEN OLD.status = 'RUNNING' AND NEW.status = 'RUNNING'
+BEGIN
+  SELECT RAISE(ABORT, 'EXECUTION_STATE_INVARIANT_VIOLATION');
+END;
 `;
 
 type TaskRow = {
@@ -186,9 +209,12 @@ function applyConnectionPragmas(db: DatabaseSync): void {
   db.exec('PRAGMA foreign_keys = ON');
 }
 
-const EXECUTION_FENCING_TRIGGERS = [
+const REQUIRED_FENCING_TRIGGERS = [
   'trg_tasks_execution_invariant_insert',
   'trg_tasks_execution_invariant_update',
+  'trg_tasks_repository_invariant_insert',
+  'trg_tasks_repository_invariant_update',
+  'trg_tasks_running_immutable_update',
 ] as const;
 
 function triggerExists(db: DatabaseSync, name: string): boolean {
@@ -198,7 +224,7 @@ function triggerExists(db: DatabaseSync, name: string): boolean {
   return row !== undefined;
 }
 
-function createExecutionFencingTriggers(db: DatabaseSync): void {
+function createAllFencingTriggers(db: DatabaseSync): void {
   db.exec(`
     CREATE TRIGGER IF NOT EXISTS trg_tasks_execution_invariant_insert
     BEFORE INSERT ON tasks
@@ -214,6 +240,29 @@ function createExecutionFencingTriggers(db: DatabaseSync): void {
       SELECT RAISE(ABORT, 'EXECUTION_STATE_INVARIANT_VIOLATION')
       WHERE (NEW.status = 'RUNNING' AND NEW.execution_instance_id IS NULL)
          OR (NEW.status != 'RUNNING' AND NEW.execution_instance_id IS NOT NULL);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tasks_repository_invariant_insert
+    BEFORE INSERT ON tasks
+    BEGIN
+      SELECT RAISE(ABORT, 'REPOSITORY_BINDING_MISMATCH')
+      WHERE NOT EXISTS (SELECT 1 FROM ledger_metadata WHERE key = 'repository_root')
+         OR NEW.repo_root != (SELECT value FROM ledger_metadata WHERE key = 'repository_root');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tasks_repository_invariant_update
+    BEFORE UPDATE ON tasks
+    BEGIN
+      SELECT RAISE(ABORT, 'REPOSITORY_BINDING_MISMATCH')
+      WHERE NOT EXISTS (SELECT 1 FROM ledger_metadata WHERE key = 'repository_root')
+         OR NEW.repo_root != (SELECT value FROM ledger_metadata WHERE key = 'repository_root');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tasks_running_immutable_update
+    BEFORE UPDATE ON tasks
+    WHEN OLD.status = 'RUNNING' AND NEW.status = 'RUNNING'
+    BEGIN
+      SELECT RAISE(ABORT, 'EXECUTION_STATE_INVARIANT_VIOLATION');
     END;
   `);
 }
@@ -244,8 +293,30 @@ function validateExecutionInvariantRows(db: DatabaseSync): void {
   }
 }
 
+function validateTaskRepositoryRoots(db: DatabaseSync): void {
+  const row = db
+    .prepare(`SELECT value FROM ledger_metadata WHERE key = 'repository_root'`)
+    .get() as { value: string } | undefined;
+  if (!row) {
+    throw new DomainError(
+      'REPOSITORY_BINDING_MISMATCH',
+      'Ledger metadata has no repository_root; refusing to validate task roots',
+    );
+  }
+  const bad = db
+    .prepare(`SELECT COUNT(*) AS count FROM tasks WHERE repo_root != ?`)
+    .get(row.value) as { count: number };
+  if (bad.count > 0) {
+    throw new DomainError(
+      'REPOSITORY_BINDING_MISMATCH',
+      `Ledger contains tasks whose repo_root does not match bound repository ${row.value}`,
+      { repository_root: row.value, foreign_task_count: bad.count },
+    );
+  }
+}
+
 function validateFencingObjects(db: DatabaseSync): void {
-  for (const name of EXECUTION_FENCING_TRIGGERS) {
+  for (const name of REQUIRED_FENCING_TRIGGERS) {
     if (!triggerExists(db, name)) {
       throw new DomainError(
         'SCHEMA_FENCING_MISSING',
@@ -256,13 +327,25 @@ function validateFencingObjects(db: DatabaseSync): void {
   }
 }
 
-function migrateAndValidate(db: DatabaseSync): void {
+function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
   const userVersion = Number(pragmaValue(db, 'user_version'));
   if (userVersion === 0) {
-    db.exec(CREATE_SCHEMA_SQL);
-    createExecutionFencingTriggers(db);
-    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-  } else if (userVersion === 1 || userVersion === 2) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.exec(CREATE_SCHEMA_SQL);
+      createAllFencingTriggers(db);
+      if (repoRoot !== undefined) {
+        requireRepositoryBinding(db, repoRoot);
+      }
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      db.exec('COMMIT');
+    } catch (error) {
+      if (db.isTransaction) {
+        db.exec('ROLLBACK');
+      }
+      throw error;
+    }
+  } else if (userVersion === 1 || userVersion === 2 || userVersion === 3) {
     db.exec('BEGIN IMMEDIATE');
     try {
       if (userVersion === 1) {
@@ -290,8 +373,28 @@ function migrateAndValidate(db: DatabaseSync): void {
         `);
       }
 
+      const metadata = db
+        .prepare(`SELECT value FROM ledger_metadata WHERE key = 'repository_root'`)
+        .get() as { value: string } | undefined;
+      if (!metadata) {
+        if (repoRoot === undefined) {
+          throw new DomainError(
+            'REPOSITORY_BINDING_MISMATCH',
+            'Cannot migrate an unbound legacy ledger without a canonical repository root',
+          );
+        }
+        requireRepositoryBinding(db, repoRoot);
+      } else if (repoRoot !== undefined && metadata.value !== repoRoot) {
+        throw new DomainError(
+          'REPOSITORY_BINDING_MISMATCH',
+          `Ledger is bound to repository ${metadata.value}; refusing to migrate from ${repoRoot}`,
+          { expected: metadata.value, actual: repoRoot },
+        );
+      }
+
       validateExecutionInvariantRows(db);
-      createExecutionFencingTriggers(db);
+      validateTaskRepositoryRoots(db);
+      createAllFencingTriggers(db);
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       db.exec('COMMIT');
     } catch (error) {
@@ -300,7 +403,32 @@ function migrateAndValidate(db: DatabaseSync): void {
       }
       throw error;
     }
-  } else if (userVersion !== SCHEMA_VERSION) {
+  } else if (userVersion === SCHEMA_VERSION) {
+    if (repoRoot !== undefined) {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        requireRepositoryBinding(db, repoRoot);
+        validateTaskRepositoryRoots(db);
+        db.exec('COMMIT');
+      } catch (error) {
+        if (db.isTransaction) {
+          db.exec('ROLLBACK');
+        }
+        throw error;
+      }
+    } else {
+      const metadata = db
+        .prepare(`SELECT value FROM ledger_metadata WHERE key = 'repository_root'`)
+        .get() as { value: string } | undefined;
+      if (!metadata) {
+        throw new DomainError(
+          'REPOSITORY_BINDING_MISMATCH',
+          'Current schema ledger is missing repository binding metadata',
+        );
+      }
+      validateTaskRepositoryRoots(db);
+    }
+  } else {
     throw new DomainError(
       'SCHEMA_MISMATCH',
       `Unsupported schema user_version ${userVersion}; expected ${SCHEMA_VERSION}`,
@@ -412,22 +540,8 @@ export class Store {
     });
     try {
       applyConnectionPragmas(db);
-      migrateAndValidate(db);
-      let boundRepoRoot: string | undefined;
-      if (options?.repoRoot !== undefined) {
-        db.exec('BEGIN IMMEDIATE');
-        try {
-          requireRepositoryBinding(db, options.repoRoot);
-          db.exec('COMMIT');
-        } catch (error) {
-          if (db.isTransaction) {
-            db.exec('ROLLBACK');
-          }
-          throw error;
-        }
-        boundRepoRoot = options.repoRoot;
-      }
-      return new Store(path, db, boundRepoRoot);
+      migrateAndValidate(db, options?.repoRoot);
+      return new Store(path, db, options?.repoRoot);
     } catch (error) {
       db.close();
       throw error;
