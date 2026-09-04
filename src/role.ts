@@ -4,12 +4,19 @@ export const OWNER_TOOLS = [
   'create_task',
   'get_task',
   'list_active_tasks',
+  'recover_task',
   'resume_task',
   'cancel_task',
   'close_task',
 ] as const;
 
-export const WORKER_TOOLS = ['claim_task', 'get_task', 'report_result', 'report_blocked'] as const;
+export const WORKER_TOOLS = [
+  'claim_task',
+  'claim_next_task',
+  'get_task',
+  'report_result',
+  'report_blocked',
+] as const;
 
 export type ToolName =
   | (typeof OWNER_TOOLS)[number]

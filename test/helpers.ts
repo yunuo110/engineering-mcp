@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -134,6 +135,7 @@ export type Connected = {
   client: Client;
   server: McpServer;
   store: Store;
+  executionInstanceId: string;
   close: () => Promise<void>;
 };
 
@@ -141,8 +143,9 @@ export async function connectInProcess(
   processRole: ProcessRole,
   repoPath: string,
   store: Store,
+  executionInstanceId: string = randomUUID(),
 ): Promise<Connected> {
-  const server = createEngineeringServer({ processRole, repoPath, store });
+  const server = createEngineeringServer({ processRole, repoPath, store, executionInstanceId });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test-client', version: '0.0.0' });
   await server.connect(serverTransport);
@@ -151,6 +154,7 @@ export async function connectInProcess(
     client,
     server,
     store,
+    executionInstanceId,
     close: async () => {
       await client.close();
       await server.close();

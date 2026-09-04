@@ -27,6 +27,7 @@ CREATE TABLE tasks (
   status TEXT NOT NULL,
   owner_role TEXT NOT NULL,
   assignee_role TEXT,
+  execution_instance_id TEXT,
   repo_root TEXT NOT NULL,
   base_commit TEXT NOT NULL,
   branch TEXT NOT NULL,
@@ -58,6 +59,27 @@ CREATE TABLE task_events (
   CHECK (actor_role IN ('OWNER','JUNIOR','PRINCIPAL')),
   CHECK (kind IN ('created','claimed','result','blocked','resumed','cancelled','closed'))
 ) STRICT;
+
+CREATE TABLE ledger_metadata (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+) STRICT;
+
+CREATE TRIGGER trg_tasks_execution_invariant_insert
+BEFORE INSERT ON tasks
+BEGIN
+  SELECT RAISE(ABORT, 'EXECUTION_STATE_INVARIANT_VIOLATION')
+  WHERE (NEW.status = 'RUNNING' AND NEW.execution_instance_id IS NULL)
+     OR (NEW.status != 'RUNNING' AND NEW.execution_instance_id IS NOT NULL);
+END;
+
+CREATE TRIGGER trg_tasks_execution_invariant_update
+BEFORE UPDATE ON tasks
+BEGIN
+  SELECT RAISE(ABORT, 'EXECUTION_STATE_INVARIANT_VIOLATION')
+  WHERE (NEW.status = 'RUNNING' AND NEW.execution_instance_id IS NULL)
+     OR (NEW.status != 'RUNNING' AND NEW.execution_instance_id IS NOT NULL);
+END;
 `;
 
 type TaskRow = {
@@ -66,6 +88,7 @@ type TaskRow = {
   status: string;
   owner_role: string;
   assignee_role: string | null;
+  execution_instance_id: string | null;
   repo_root: string;
   base_commit: string;
   branch: string;
@@ -130,6 +153,7 @@ function rowToTask(row: TaskRow): TaskContract {
     status: row.status,
     owner_role: row.owner_role,
     assignee_role: row.assignee_role,
+    execution_instance_id: row.execution_instance_id,
     repo_root: row.repo_root,
     base_commit: row.base_commit,
     branch: row.branch,
@@ -162,11 +186,120 @@ function applyConnectionPragmas(db: DatabaseSync): void {
   db.exec('PRAGMA foreign_keys = ON');
 }
 
+const EXECUTION_FENCING_TRIGGERS = [
+  'trg_tasks_execution_invariant_insert',
+  'trg_tasks_execution_invariant_update',
+] as const;
+
+function triggerExists(db: DatabaseSync, name: string): boolean {
+  const row = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
+    .get(name) as { name: string } | undefined;
+  return row !== undefined;
+}
+
+function createExecutionFencingTriggers(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_tasks_execution_invariant_insert
+    BEFORE INSERT ON tasks
+    BEGIN
+      SELECT RAISE(ABORT, 'EXECUTION_STATE_INVARIANT_VIOLATION')
+      WHERE (NEW.status = 'RUNNING' AND NEW.execution_instance_id IS NULL)
+         OR (NEW.status != 'RUNNING' AND NEW.execution_instance_id IS NOT NULL);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tasks_execution_invariant_update
+    BEFORE UPDATE ON tasks
+    BEGIN
+      SELECT RAISE(ABORT, 'EXECUTION_STATE_INVARIANT_VIOLATION')
+      WHERE (NEW.status = 'RUNNING' AND NEW.execution_instance_id IS NULL)
+         OR (NEW.status != 'RUNNING' AND NEW.execution_instance_id IS NOT NULL);
+    END;
+  `);
+}
+
+function validateExecutionInvariantRows(db: DatabaseSync): void {
+  const runningWithoutOwner = db
+    .prepare(`SELECT COUNT(*) AS count FROM tasks WHERE status = 'RUNNING' AND execution_instance_id IS NULL`)
+    .get() as { count: number };
+  if (runningWithoutOwner.count > 0) {
+    throw new DomainError(
+      'LEGACY_RUNNING_TASK_PREVENTS_MIGRATION',
+      'A legacy RUNNING task with no execution_instance_id exists; resolve or stop it under the old version before migration',
+      { running_without_owner_count: runningWithoutOwner.count },
+    );
+  }
+
+  const nonRunningWithOwner = db
+    .prepare(
+      `SELECT COUNT(*) AS count FROM tasks WHERE status != 'RUNNING' AND execution_instance_id IS NOT NULL`,
+    )
+    .get() as { count: number };
+  if (nonRunningWithOwner.count > 0) {
+    throw new DomainError(
+      'EXECUTION_STATE_INVARIANT_VIOLATION',
+      'Existing task data violates the execution ownership invariant',
+      { non_running_with_owner_count: nonRunningWithOwner.count },
+    );
+  }
+}
+
+function validateFencingObjects(db: DatabaseSync): void {
+  for (const name of EXECUTION_FENCING_TRIGGERS) {
+    if (!triggerExists(db, name)) {
+      throw new DomainError(
+        'SCHEMA_FENCING_MISSING',
+        `Required execution fencing trigger ${name} is missing`,
+        { trigger: name },
+      );
+    }
+  }
+}
+
 function migrateAndValidate(db: DatabaseSync): void {
   const userVersion = Number(pragmaValue(db, 'user_version'));
   if (userVersion === 0) {
     db.exec(CREATE_SCHEMA_SQL);
+    createExecutionFencingTriggers(db);
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+  } else if (userVersion === 1 || userVersion === 2) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      if (userVersion === 1) {
+        const running = db
+          .prepare(`SELECT COUNT(*) AS count FROM tasks WHERE status = 'RUNNING'`)
+          .get() as { count: number };
+        if (running.count > 0) {
+          throw new DomainError(
+            'LEGACY_RUNNING_TASK_PREVENTS_MIGRATION',
+            'A legacy RUNNING task exists; resolve or stop it under the old version before migration',
+            { running_count: running.count },
+          );
+        }
+      }
+
+      if (!columnExists(db, 'tasks', 'execution_instance_id')) {
+        db.exec('ALTER TABLE tasks ADD COLUMN execution_instance_id TEXT');
+      }
+      if (!tableExists(db, 'ledger_metadata')) {
+        db.exec(`
+          CREATE TABLE ledger_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+          ) STRICT;
+        `);
+      }
+
+      validateExecutionInvariantRows(db);
+      createExecutionFencingTriggers(db);
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      db.exec('COMMIT');
+    } catch (error) {
+      if (db.isTransaction) {
+        db.exec('ROLLBACK');
+      }
+      throw error;
+    }
   } else if (userVersion !== SCHEMA_VERSION) {
     throw new DomainError(
       'SCHEMA_MISMATCH',
@@ -192,26 +325,86 @@ function migrateAndValidate(db: DatabaseSync): void {
     );
   }
 
-  const tables = db
-    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tasks', 'task_events')`)
-    .all() as Array<{ name: string }>;
-  const names = new Set(tables.map((row) => row.name));
-  if (!names.has('tasks') || !names.has('task_events')) {
+  const names = new Set(
+    (
+      db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tasks', 'task_events', 'ledger_metadata')`,
+        )
+        .all() as Array<{ name: string }>
+    ).map((row) => row.name),
+  );
+  if (!names.has('tasks') || !names.has('task_events') || !names.has('ledger_metadata')) {
     throw new DomainError('SCHEMA_MISMATCH', 'Required tables are missing');
   }
+  validateFencingObjects(db);
+}
+
+function tableExists(db: DatabaseSync, name: string): boolean {
+  const row = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`)
+    .get(name) as { name: string } | undefined;
+  return row !== undefined;
+}
+
+function columnExists(db: DatabaseSync, table: string, column: string): boolean {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return columns.some((item) => item.name === column);
+}
+
+function requireRepositoryBinding(db: DatabaseSync, repoRoot: string): void {
+  const row = db
+    .prepare(`SELECT value FROM ledger_metadata WHERE key = 'repository_root'`)
+    .get() as { value: string } | undefined;
+  if (row) {
+    if (row.value !== repoRoot) {
+      throw new DomainError(
+        'REPOSITORY_BINDING_MISMATCH',
+        `Ledger is bound to repository ${row.value}; refusing to open from ${repoRoot}`,
+        { expected: row.value, actual: repoRoot },
+      );
+    }
+    return;
+  }
+
+  const repoRows = db.prepare(`SELECT DISTINCT repo_root FROM tasks`).all() as Array<{
+    repo_root: string;
+  }>;
+  if (repoRows.length === 0) {
+    db.prepare(`INSERT INTO ledger_metadata (key, value) VALUES ('repository_root', ?)`).run(repoRoot);
+    return;
+  }
+  if (repoRows.length === 1 && repoRows[0]?.repo_root === repoRoot) {
+    db.prepare(`INSERT INTO ledger_metadata (key, value) VALUES ('repository_root', ?)`).run(repoRoot);
+    return;
+  }
+  if (repoRows.length === 1) {
+    throw new DomainError(
+      'REPOSITORY_BINDING_MISMATCH',
+      `Ledger contains tasks for repository ${repoRows[0]?.repo_root}; refusing to bind to ${repoRoot}`,
+      { task_repo_root: repoRows[0]?.repo_root, requested_repo_root: repoRoot },
+    );
+  }
+  throw new DomainError(
+    'REPOSITORY_BINDING_MISMATCH',
+    'Ledger contains tasks from multiple repositories; refusing to infer repository binding',
+    { requested_repo_root: repoRoot },
+  );
 }
 
 export class Store {
   readonly path: string;
   private readonly db: DatabaseSync;
   private closed = false;
+  private boundRepoRoot: string | undefined;
 
-  private constructor(path: string, db: DatabaseSync) {
+  private constructor(path: string, db: DatabaseSync, boundRepoRoot?: string) {
     this.path = path;
     this.db = db;
+    this.boundRepoRoot = boundRepoRoot;
   }
 
-  static open(path: string): Store {
+  static open(path: string, options?: { repoRoot?: string }): Store {
     mkdirSync(dirname(path), { recursive: true });
     const db = new DatabaseSync(path, {
       timeout: BUSY_TIMEOUT_MS,
@@ -220,11 +413,46 @@ export class Store {
     try {
       applyConnectionPragmas(db);
       migrateAndValidate(db);
-      return new Store(path, db);
+      let boundRepoRoot: string | undefined;
+      if (options?.repoRoot !== undefined) {
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          requireRepositoryBinding(db, options.repoRoot);
+          db.exec('COMMIT');
+        } catch (error) {
+          if (db.isTransaction) {
+            db.exec('ROLLBACK');
+          }
+          throw error;
+        }
+        boundRepoRoot = options.repoRoot;
+      }
+      return new Store(path, db, boundRepoRoot);
     } catch (error) {
       db.close();
       throw error;
     }
+  }
+
+  bindRepository(repoRoot: string): void {
+    if (this.closed) {
+      throw new DomainError('SCHEMA_MISMATCH', 'Cannot bind a closed Store');
+    }
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      requireRepositoryBinding(this.db, repoRoot);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      if (this.db.isTransaction) {
+        this.db.exec('ROLLBACK');
+      }
+      throw error;
+    }
+    this.boundRepoRoot = repoRoot;
+  }
+
+  get repositoryRoot(): string | undefined {
+    return this.boundRepoRoot;
   }
 
   close(): void {
@@ -258,10 +486,14 @@ export class Store {
     const rows = (
       type
         ? (this.db
-            .prepare(`SELECT * FROM tasks WHERE status != 'CLOSED' AND type = ? ORDER BY created_at ASC`)
+            .prepare(
+              `SELECT * FROM tasks WHERE status != 'CLOSED' AND type = ? ORDER BY created_at ASC, rowid ASC`,
+            )
             .all(type) as TaskRow[])
         : (this.db
-            .prepare(`SELECT * FROM tasks WHERE status != 'CLOSED' ORDER BY created_at ASC`)
+            .prepare(
+              `SELECT * FROM tasks WHERE status != 'CLOSED' ORDER BY created_at ASC, rowid ASC`,
+            )
             .all() as TaskRow[])
     );
     return rows.map(rowToTask);
@@ -274,13 +506,26 @@ export class Store {
     return row ? rowToTask(row) : undefined;
   }
 
+  getNextReady(type: TaskType): TaskContract | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE status = 'READY' AND type = ?
+         ORDER BY created_at ASC, rowid ASC
+         LIMIT 1`,
+      )
+      .get(type) as TaskRow | undefined;
+    return row ? rowToTask(row) : undefined;
+  }
+
   insertTask(task: TaskContract): void {
     this.db
       .prepare(
         `INSERT INTO tasks (
-          id, type, status, owner_role, assignee_role, repo_root, base_commit, branch,
-          payload_json, result_json, blocker_json, revision, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, type, status, owner_role, assignee_role, execution_instance_id,
+          repo_root, base_commit, branch, payload_json, result_json, blocker_json,
+          revision, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         task.id,
@@ -288,6 +533,7 @@ export class Store {
         task.status,
         task.owner_role,
         task.assignee_role,
+        task.execution_instance_id,
         task.repo_root,
         task.base_commit,
         task.branch,
@@ -304,9 +550,9 @@ export class Store {
     const result = this.db
       .prepare(
         `UPDATE tasks SET
-          type = ?, status = ?, owner_role = ?, assignee_role = ?, repo_root = ?,
-          base_commit = ?, branch = ?, payload_json = ?, result_json = ?, blocker_json = ?,
-          revision = ?, created_at = ?, updated_at = ?
+          type = ?, status = ?, owner_role = ?, assignee_role = ?, execution_instance_id = ?,
+          repo_root = ?, base_commit = ?, branch = ?, payload_json = ?, result_json = ?,
+          blocker_json = ?, revision = ?, created_at = ?, updated_at = ?
          WHERE id = ?`,
       )
       .run(
@@ -314,6 +560,7 @@ export class Store {
         task.status,
         task.owner_role,
         task.assignee_role,
+        task.execution_instance_id,
         task.repo_root,
         task.base_commit,
         task.branch,

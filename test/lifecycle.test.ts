@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   cancelTask,
+  claimNextTask,
   claimTask,
   closeTask,
   createTask,
   getTask,
   listActiveTasks,
+  recoverTask,
   reportBlocked,
   reportResult,
   resumeTask,
@@ -44,6 +46,9 @@ function store(): Store {
   return opened.store;
 }
 
+const EXECUTION_INSTANCE = 'test-execution-instance';
+const OTHER_EXECUTION_INSTANCE = 'other-execution-instance';
+
 describe('lifecycle', () => {
   it('creates a READY task without a CREATED state', () => {
     const db = store();
@@ -71,9 +76,10 @@ describe('lifecycle', () => {
   it('claims an implementation task for JUNIOR and returns the contract', () => {
     const db = store();
     const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
-    const claimed = claimTask(db, cleanGit(), 'JUNIOR', created.id, created.revision);
+    const claimed = claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision);
     expect(claimed.status).toBe('RUNNING');
     expect(claimed.assignee_role).toBe('JUNIOR');
+    expect(claimed.execution_instance_id).toBe(EXECUTION_INSTANCE);
     expect(claimed.payload).toEqual(implPayload);
     expect(claimed.revision).toBe(2);
   });
@@ -82,17 +88,17 @@ describe('lifecycle', () => {
     const db = store();
     const impl = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
     const diag = createTask(db, cleanGit(), { type: 'DIAGNOSIS', payload: diagnosisPayload });
-    expectDomain(() => claimTask(db, cleanGit(), 'PRINCIPAL', impl.id, impl.revision), 'WRONG_TASK_TYPE');
-    expectDomain(() => claimTask(db, cleanGit(), 'JUNIOR', diag.id, diag.revision), 'WRONG_TASK_TYPE');
+    expectDomain(() => claimTask(db, cleanGit(), 'PRINCIPAL', EXECUTION_INSTANCE, impl.id, impl.revision), 'WRONG_TASK_TYPE');
+    expectDomain(() => claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, diag.id, diag.revision), 'WRONG_TASK_TYPE');
   });
 
   it('serializes RUNNING so diagnosis cannot run beside implementation', () => {
     const db = store();
     const impl = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
     const diag = createTask(db, cleanGit(), { type: 'DIAGNOSIS', payload: diagnosisPayload });
-    claimTask(db, cleanGit(), 'JUNIOR', impl.id, impl.revision);
+    claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, impl.id, impl.revision);
     expectDomain(
-      () => claimTask(db, cleanGit(), 'PRINCIPAL', diag.id, diag.revision),
+      () => claimTask(db, cleanGit(), 'PRINCIPAL', EXECUTION_INSTANCE, diag.id, diag.revision),
       'TASK_ALREADY_RUNNING',
     );
   });
@@ -101,26 +107,26 @@ describe('lifecycle', () => {
     const db = store();
     const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
     expectDomain(
-      () => claimTask(db, cleanGit({ head: 'bbb' }), 'JUNIOR', created.id, created.revision),
+      () => claimTask(db, cleanGit({ head: 'bbb' }), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision),
       'HEAD_MISMATCH',
     );
     expectDomain(
-      () => claimTask(db, cleanGit({ branch: 'other' }), 'JUNIOR', created.id, created.revision),
+      () => claimTask(db, cleanGit({ branch: 'other' }), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision),
       'BRANCH_MISMATCH',
     );
     expectDomain(
       () =>
-        claimTask(db, cleanGit({ clean: false, porcelain: ' M x' }), 'JUNIOR', created.id, created.revision),
+        claimTask(db, cleanGit({ clean: false, porcelain: ' M x' }), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision),
       'DIRTY_WORKTREE',
     );
-    expectDomain(() => claimTask(db, cleanGit(), 'JUNIOR', created.id, 99), 'REVISION_MISMATCH');
+    expectDomain(() => claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, created.id, 99), 'REVISION_MISMATCH');
   });
 
   it('reports completed implementation results and releases the running slot', () => {
     const db = store();
     const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
-    const claimed = claimTask(db, cleanGit(), 'JUNIOR', created.id, created.revision);
-    const done = reportResult(db, 'JUNIOR', {
+    const claimed = claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision);
+    const done = reportResult(db, 'JUNIOR', EXECUTION_INSTANCE, {
       task_id: claimed.id,
       revision: claimed.revision,
       outcome: 'completed',
@@ -130,15 +136,15 @@ describe('lifecycle', () => {
     expect(done.result).toEqual(implResult);
     expect(db.getRunning()).toBeUndefined();
     const diag = createTask(db, cleanGit(), { type: 'DIAGNOSIS', payload: diagnosisPayload });
-    const claimedDiag = claimTask(db, cleanGit(), 'PRINCIPAL', diag.id, diag.revision);
+    const claimedDiag = claimTask(db, cleanGit(), 'PRINCIPAL', EXECUTION_INSTANCE, diag.id, diag.revision);
     expect(claimedDiag.status).toBe('RUNNING');
   });
 
   it('reports failed and blocked, then resumes to READY with a new baseline', () => {
     const db = store();
     const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
-    const claimed = claimTask(db, cleanGit(), 'JUNIOR', created.id, created.revision);
-    const blocked = reportBlocked(db, 'JUNIOR', {
+    const claimed = claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision);
+    const blocked = reportBlocked(db, 'JUNIOR', EXECUTION_INSTANCE, {
       task_id: claimed.id,
       revision: claimed.revision,
       blocker: {
@@ -171,8 +177,8 @@ describe('lifecycle', () => {
   it('resumes FAILED and COMPLETED, and refuses CLOSED', () => {
     const db = store();
     const created = createTask(db, cleanGit(), { type: 'DIAGNOSIS', payload: diagnosisPayload });
-    const claimed = claimTask(db, cleanGit(), 'PRINCIPAL', created.id, created.revision);
-    const failed = reportResult(db, 'PRINCIPAL', {
+    const claimed = claimTask(db, cleanGit(), 'PRINCIPAL', EXECUTION_INSTANCE, created.id, created.revision);
+    const failed = reportResult(db, 'PRINCIPAL', EXECUTION_INSTANCE, {
       task_id: claimed.id,
       revision: claimed.revision,
       outcome: 'failed',
@@ -180,8 +186,8 @@ describe('lifecycle', () => {
     });
     expect(failed.status).toBe('FAILED');
     const ready = resumeTask(db, cleanGit(), { task_id: failed.id, revision: failed.revision });
-    const claimed2 = claimTask(db, cleanGit(), 'PRINCIPAL', ready.id, ready.revision);
-    const completed = reportResult(db, 'PRINCIPAL', {
+    const claimed2 = claimTask(db, cleanGit(), 'PRINCIPAL', EXECUTION_INSTANCE, ready.id, ready.revision);
+    const completed = reportResult(db, 'PRINCIPAL', EXECUTION_INSTANCE, {
       task_id: claimed2.id,
       revision: claimed2.revision,
       outcome: 'completed',
@@ -192,8 +198,8 @@ describe('lifecycle', () => {
       revision: completed.revision,
     });
     expect(readyAgain.status).toBe('READY');
-    const claimed3 = claimTask(db, cleanGit({ head: 'ddd' }), 'PRINCIPAL', readyAgain.id, readyAgain.revision);
-    const completed2 = reportResult(db, 'PRINCIPAL', {
+    const claimed3 = claimTask(db, cleanGit({ head: 'ddd' }), 'PRINCIPAL', EXECUTION_INSTANCE, readyAgain.id, readyAgain.revision);
+    const completed2 = reportResult(db, 'PRINCIPAL', EXECUTION_INSTANCE, {
       task_id: claimed3.id,
       revision: claimed3.revision,
       outcome: 'completed',
@@ -211,7 +217,7 @@ describe('lifecycle', () => {
     const db = store();
     const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
     expectDomain(() => getTask(db, 'JUNIOR', created.id), 'NOT_ASSIGNED');
-    const claimed = claimTask(db, cleanGit(), 'JUNIOR', created.id, created.revision);
+    const claimed = claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision);
     expect(getTask(db, 'JUNIOR', claimed.id).status).toBe('RUNNING');
     expect(getTask(db, 'OWNER', created.id).id).toBe(created.id);
   });
@@ -219,8 +225,8 @@ describe('lifecycle', () => {
   it('lists active tasks and omits CLOSED', () => {
     const db = store();
     const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
-    const claimed = claimTask(db, cleanGit(), 'JUNIOR', created.id, created.revision);
-    const completed = reportResult(db, 'JUNIOR', {
+    const claimed = claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision);
+    const completed = reportResult(db, 'JUNIOR', EXECUTION_INSTANCE, {
       task_id: claimed.id,
       revision: claimed.revision,
       outcome: 'completed',
@@ -234,7 +240,7 @@ describe('lifecycle', () => {
   it('cancels a running task and releases the slot', () => {
     const db = store();
     const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
-    const claimed = claimTask(db, cleanGit(), 'JUNIOR', created.id, created.revision);
+    const claimed = claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision);
     const cancelled = cancelTask(db, claimed.id, claimed.revision, 'owner stopped work');
     expect(cancelled.status).toBe('CANCELLED');
     expect(db.getRunning()).toBeUndefined();
@@ -245,10 +251,10 @@ describe('lifecycle', () => {
   it('rejects an implementation result on a diagnosis task', () => {
     const db = store();
     const created = createTask(db, cleanGit(), { type: 'DIAGNOSIS', payload: diagnosisPayload });
-    const claimed = claimTask(db, cleanGit(), 'PRINCIPAL', created.id, created.revision);
+    const claimed = claimTask(db, cleanGit(), 'PRINCIPAL', EXECUTION_INSTANCE, created.id, created.revision);
     expectDomain(
       () =>
-        reportResult(db, 'PRINCIPAL', {
+        reportResult(db, 'PRINCIPAL', EXECUTION_INSTANCE, {
           task_id: claimed.id,
           revision: claimed.revision,
           outcome: 'completed',
@@ -272,10 +278,10 @@ describe('lifecycle', () => {
     );
 
     const created2 = createTask(db, cleanGit(), { type: 'DIAGNOSIS', payload: diagnosisPayload });
-    const claimed = claimTask(db, cleanGit(), 'PRINCIPAL', created2.id, created2.revision);
+    const claimed = claimTask(db, cleanGit(), 'PRINCIPAL', EXECUTION_INSTANCE, created2.id, created2.revision);
     expectDomain(
       () =>
-        reportResult(db, 'PRINCIPAL', {
+        reportResult(db, 'PRINCIPAL', EXECUTION_INSTANCE, {
           task_id: claimed.id,
           revision: 99,
           outcome: 'failed',
@@ -283,7 +289,7 @@ describe('lifecycle', () => {
         }),
       'REVISION_MISMATCH',
     );
-    const failed = reportResult(db, 'PRINCIPAL', {
+    const failed = reportResult(db, 'PRINCIPAL', EXECUTION_INSTANCE, {
       task_id: claimed.id,
       revision: claimed.revision,
       outcome: 'failed',
@@ -312,7 +318,7 @@ describe('lifecycle', () => {
     expect(created.repo_root).toBe(gitA.repoRoot);
 
     expectDomain(
-      () => claimTask(db, gitB, 'JUNIOR', created.id, created.revision),
+      () => claimTask(db, gitB, 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision),
       'REPOSITORY_MISMATCH',
     );
     const afterFailedClaim = getTask(db, 'OWNER', created.id);
@@ -321,9 +327,9 @@ describe('lifecycle', () => {
     expect(afterFailedClaim.revision).toBe(created.revision);
     expect(db.listEvents(created.id).map((event) => event.kind)).toEqual(['created']);
 
-    const claimed = claimTask(db, gitA, 'JUNIOR', created.id, created.revision);
+    const claimed = claimTask(db, gitA, 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision);
     expect(claimed.status).toBe('RUNNING');
-    const blocked = reportBlocked(db, 'JUNIOR', {
+    const blocked = reportBlocked(db, 'JUNIOR', EXECUTION_INSTANCE, {
       task_id: claimed.id,
       revision: claimed.revision,
       blocker: {
@@ -352,5 +358,234 @@ describe('lifecycle', () => {
     const resumed = resumeTask(db, gitA, { task_id: blocked.id, revision: blocked.revision });
     expect(resumed.status).toBe('READY');
     expect(resumed.repo_root).toBe(gitA.repoRoot);
+  });
+
+  it('claims the next READY task in FIFO order and enforces one RUNNING slot', () => {
+    const db = store();
+    const first = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
+    const second = createTask(db, cleanGit(), {
+      type: 'IMPLEMENTATION',
+      payload: { ...implPayload, goal: 'Second goal' },
+    });
+    expect(listActiveTasks(db, 'IMPLEMENTATION').filter((task) => task.status === 'READY')).toHaveLength(2);
+    const claimed = claimNextTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE);
+    expect(claimed.id).toBe(first.id);
+    expect(claimed.status).toBe('RUNNING');
+    expect(claimed.execution_instance_id).toBe(EXECUTION_INSTANCE);
+    expect(db.getRunning()?.id).toBe(first.id);
+    expectDomain(() => claimNextTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE), 'TASK_ALREADY_RUNNING');
+    const listed = listActiveTasks(db, 'IMPLEMENTATION');
+    expect(listed.find((task) => task.id === second.id)?.status).toBe('READY');
+    expect(listed.find((task) => task.id === first.id)?.status).toBe('RUNNING');
+  });
+
+  it('returns NO_PENDING_TASK when no task of the worker type is waiting', () => {
+    const db = store();
+    expectDomain(() => claimNextTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE), 'NO_PENDING_TASK');
+    expectDomain(() => claimNextTask(db, cleanGit(), 'PRINCIPAL', EXECUTION_INSTANCE), 'NO_PENDING_TASK');
+    const diag = createTask(db, cleanGit(), { type: 'DIAGNOSIS', payload: diagnosisPayload });
+    expectDomain(() => claimNextTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE), 'NO_PENDING_TASK');
+    // Cleanup so the leaked DIAGNOSIS task is not left open for later assertions.
+    cancelTask(db, diag.id, diag.revision);
+  });
+
+  it('does not count terminal tasks as pending READY queue entries', () => {
+    const db = store();
+    const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
+    const claimed = claimNextTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE);
+    const completed = reportResult(db, 'JUNIOR', EXECUTION_INSTANCE, {
+      task_id: claimed.id,
+      revision: claimed.revision,
+      outcome: 'completed',
+      result: implResult,
+    });
+    expect(listActiveTasks(db, 'IMPLEMENTATION').filter((task) => task.status === 'READY')).toHaveLength(0);
+    expectDomain(() => claimNextTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE), 'NO_PENDING_TASK');
+    expect(completed.id).toBe(created.id);
+  });
+
+  it('does not claim a queued task when the repository safety baseline is invalid', () => {
+    const db = store();
+    const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
+    const eventsBefore = db.listEvents(created.id).length;
+    expectDomain(
+      () => claimNextTask(db, cleanGit({ head: 'bbb' }), 'JUNIOR', EXECUTION_INSTANCE),
+      'HEAD_MISMATCH',
+    );
+    expectDomain(
+      () => claimNextTask(db, cleanGit({ clean: false, porcelain: ' M x' }), 'JUNIOR', EXECUTION_INSTANCE),
+      'DIRTY_WORKTREE',
+    );
+    const after = getTask(db, 'OWNER', created.id);
+    expect(after.status).toBe('READY');
+    expect(after.revision).toBe(created.revision);
+    expect(db.listEvents(created.id)).toHaveLength(eventsBefore);
+  });
+
+  it('explicitly recovers a RUNNING task to BLOCKED with structured metadata', () => {
+    const db = store();
+    const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
+    const claimed = claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision);
+    expect(db.getRunning()?.id).toBe(created.id);
+
+    const recovered = recoverTask(db, cleanGit(), {
+      task_id: claimed.id,
+      revision: claimed.revision,
+    });
+    expect(recovered?.id).toBe(created.id);
+    expect(recovered?.status).toBe('BLOCKED');
+    expect(recovered?.revision).toBe(claimed.revision + 1);
+    expect(recovered?.execution_instance_id).toBeNull();
+    expect(recovered?.blocker?.reason).toBe('CONTEXT_STALE');
+    expect(recovered?.blocker?.recovery?.previous_status).toBe('RUNNING');
+    expect(recovered?.blocker?.recovery?.detected_by_role).toBe('OWNER');
+    expect(recovered?.blocker?.recovery?.retry_safe).toBe(false);
+    expect(recovered?.blocker?.recovery?.reason).toBe('EXPLICIT_OWNER_RECOVERY');
+    expect(recovered?.blocker?.recovery?.prior_execution_instance_id).toBe(EXECUTION_INSTANCE);
+    expect(db.getRunning()).toBeUndefined();
+
+    const event = db.listEvents(created.id).at(-1);
+    expect(event?.kind).toBe('blocked');
+    const recovery = event?.detail?.recovery as Record<string, unknown> | undefined;
+    expect(recovery?.reason).toBe('EXPLICIT_OWNER_RECOVERY');
+    expect(recovery?.previous_status).toBe('RUNNING');
+    expect(recovery?.detected_by_role).toBe('OWNER');
+    expect(recovery?.retry_safe).toBe(false);
+    expect(event?.detail?.prior_execution_instance_id).toBe(EXECUTION_INSTANCE);
+  });
+
+  it('enforces same-role execution ownership for worker mutations', () => {
+    const db = store();
+    const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
+    const claimed = claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision);
+    expect(claimed.execution_instance_id).toBe(EXECUTION_INSTANCE);
+
+    expectDomain(
+      () =>
+        reportBlocked(db, 'JUNIOR', OTHER_EXECUTION_INSTANCE, {
+          task_id: claimed.id,
+          revision: claimed.revision,
+          blocker: {
+            reason: 'DECISION_REQUIRED',
+            summary: 'wrong instance attempt',
+            need_from_owner: 'none',
+            evidence_refs: [],
+          },
+        }),
+      'EXECUTION_OWNER_MISMATCH',
+    );
+    expectDomain(
+      () =>
+        reportResult(db, 'JUNIOR', OTHER_EXECUTION_INSTANCE, {
+          task_id: claimed.id,
+          revision: claimed.revision,
+          outcome: 'completed',
+          result: implResult,
+        }),
+      'EXECUTION_OWNER_MISMATCH',
+    );
+
+    const after = getTask(db, 'OWNER', created.id);
+    expect(after.status).toBe('RUNNING');
+    expect(after.execution_instance_id).toBe(EXECUTION_INSTANCE);
+    expect(db.listEvents(created.id)).toHaveLength(2);
+
+    const done = reportResult(db, 'JUNIOR', EXECUTION_INSTANCE, {
+      task_id: claimed.id,
+      revision: claimed.revision,
+      outcome: 'completed',
+      result: implResult,
+    });
+    expect(done.status).toBe('COMPLETED');
+    expect(done.execution_instance_id).toBeNull();
+  });
+
+  it('requires RUNNING state, current revision, and matching repository for recovery', () => {
+    const db = store();
+    const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
+    const claimed = claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision);
+    const ready = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
+    const eventsBefore = db.listEvents(created.id).length;
+
+    expectDomain(
+      () => recoverTask(db, cleanGit(), { task_id: ready.id, revision: ready.revision }),
+      'INVALID_RECOVERY_STATE',
+    );
+    expectDomain(
+      () => recoverTask(db, cleanGit({ head: 'bbb' }), { task_id: claimed.id, revision: claimed.revision + 99 }),
+      'REVISION_MISMATCH',
+    );
+    expectDomain(
+      () => recoverTask(db, cleanGit({ repoRoot: 'C:/other' }), { task_id: claimed.id, revision: claimed.revision }),
+      'REPOSITORY_MISMATCH',
+    );
+
+    const afterFailed = getTask(db, 'OWNER', created.id);
+    expect(afterFailed.status).toBe('RUNNING');
+    expect(afterFailed.execution_instance_id).toBe(EXECUTION_INSTANCE);
+    expect(afterFailed.revision).toBe(claimed.revision);
+    expect(db.listEvents(created.id)).toHaveLength(eventsBefore);
+  });
+
+  it('clears execution ownership on terminal, blocked, resumed, and explicit recovery paths', () => {
+    const db = store();
+    const first = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
+    const claimed = claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, first.id, first.revision);
+    const blocked = reportBlocked(db, 'JUNIOR', EXECUTION_INSTANCE, {
+      task_id: claimed.id,
+      revision: claimed.revision,
+      blocker: {
+        reason: 'DECISION_REQUIRED',
+        summary: 'Need owner input',
+        need_from_owner: 'Confirm scope',
+        evidence_refs: [],
+      },
+    });
+    expect(blocked.execution_instance_id).toBeNull();
+    const resumed = resumeTask(db, cleanGit({ head: 'bbb222' }), {
+      task_id: blocked.id,
+      revision: blocked.revision,
+    });
+    expect(resumed.execution_instance_id).toBeNull();
+    expect(resumed.status).toBe('READY');
+
+    const claimedAgain = claimTask(db, cleanGit({ head: 'bbb222' }), 'JUNIOR', EXECUTION_INSTANCE, resumed.id, resumed.revision);
+    const recovered = recoverTask(db, cleanGit({ head: 'bbb222' }), {
+      task_id: claimedAgain.id,
+      revision: claimedAgain.revision,
+    });
+    expect(recovered.execution_instance_id).toBeNull();
+    const resumed2 = resumeTask(db, cleanGit({ head: 'ccc333' }), {
+      task_id: recovered.id,
+      revision: recovered.revision,
+    });
+    expect(resumed2.execution_instance_id).toBeNull();
+    expect(resumed2.status).toBe('READY');
+    expect(first.id).toBe(resumed2.id);
+  });
+
+  it('rejects old execution attempts after explicit recovery', () => {
+    const db = store();
+    const created = createTask(db, cleanGit(), { type: 'IMPLEMENTATION', payload: implPayload });
+    const claimed = claimTask(db, cleanGit(), 'JUNIOR', EXECUTION_INSTANCE, created.id, created.revision);
+    const recovered = recoverTask(db, cleanGit(), {
+      task_id: claimed.id,
+      revision: claimed.revision,
+    });
+    expect(recovered.status).toBe('BLOCKED');
+
+    expectDomain(
+      () =>
+        reportResult(db, 'JUNIOR', EXECUTION_INSTANCE, {
+          task_id: claimed.id,
+          revision: claimed.revision,
+          outcome: 'completed',
+          result: implResult,
+        }),
+      'REVISION_MISMATCH',
+    );
+    const after = getTask(db, 'OWNER', created.id);
+    expect(after.status).toBe('BLOCKED');
+    expect(after.execution_instance_id).toBeNull();
   });
 });

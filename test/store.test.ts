@@ -25,6 +25,7 @@ function sampleTask(overrides: Partial<TaskContract> = {}): TaskContract {
     status: 'READY',
     owner_role: 'OWNER',
     assignee_role: null,
+    execution_instance_id: null,
     repo_root: 'C:\\repo',
     base_commit: 'aaa',
     branch: 'master',
@@ -95,7 +96,7 @@ describe('Store', () => {
     const opened = openTempStore();
     stores.push(opened.store);
     dirs.push(opened.dir);
-    opened.store.insertTask(sampleTask({ status: 'RUNNING', assignee_role: 'JUNIOR' }));
+    opened.store.insertTask(sampleTask({ status: 'RUNNING', assignee_role: 'JUNIOR', execution_instance_id: 'instance-a' }));
     expect(() =>
       opened.store.insertTask(
         sampleTask({
@@ -103,6 +104,7 @@ describe('Store', () => {
           type: 'DIAGNOSIS',
           status: 'RUNNING',
           assignee_role: 'PRINCIPAL',
+          execution_instance_id: 'instance-b',
         }),
       ),
     ).toThrow();
@@ -128,5 +130,256 @@ describe('Store', () => {
     const task = sampleTask();
     opened.store.insertTask(task);
     expect(second.getTask(task.id)?.id).toBe(task.id);
+  });
+
+  it('migrates a V1 database without losing tasks or events', () => {
+    const opened = openTempStore();
+    dirs.push(opened.dir);
+    opened.store.close();
+    const path = join(opened.dir, 'v1-ledger.sqlite');
+    const raw = new DatabaseSync(path);
+    raw.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        owner_role TEXT NOT NULL,
+        assignee_role TEXT,
+        repo_root TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        result_json TEXT,
+        blocker_json TEXT,
+        revision INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX one_running_task ON tasks(status) WHERE status = 'RUNNING';
+      CREATE TABLE task_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        at TEXT NOT NULL,
+        actor_role TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        from_status TEXT,
+        to_status TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        detail_json TEXT
+      ) STRICT;
+    `);
+    raw.prepare(`
+      INSERT INTO tasks (
+        id, type, status, owner_role, assignee_role, repo_root, base_commit, branch,
+        payload_json, result_json, blocker_json, revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'migrated-task',
+      'IMPLEMENTATION',
+      'READY',
+      'OWNER',
+      null,
+      'repo-a',
+      'aaa',
+      'main',
+      JSON.stringify(implPayload),
+      null,
+      null,
+      1,
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-01T00:00:00.000Z',
+    );
+    raw.exec(`PRAGMA user_version = 1`);
+    raw.close();
+
+    const migrated = Store.open(path, { repoRoot: 'repo-a' });
+    stores.push(migrated);
+    const task = migrated.getTask('migrated-task');
+    expect(task?.execution_instance_id).toBeNull();
+    expect(task?.repo_root).toBe('repo-a');
+    expect(migrated.repositoryRoot).toBe('repo-a');
+    const versionRaw = new DatabaseSync(path);
+    const version = Object.values(
+      (versionRaw.prepare('PRAGMA user_version').get() as Record<string, number>),
+    )[0];
+    versionRaw.close();
+    expect(version).toBe(SCHEMA_VERSION);
+  });
+
+  it('binds a ledger to one repository and rejects a different repository', () => {
+    const opened = openTempStore();
+    dirs.push(opened.dir);
+    opened.store.close();
+    const path = join(opened.dir, 'ledger.sqlite');
+
+    const bound = Store.open(path, { repoRoot: 'repo-a' });
+    bound.close();
+    expect(() => Store.open(path, { repoRoot: 'repo-b' })).toThrow(DomainError);
+    try {
+      Store.open(path, { repoRoot: 'repo-b' });
+      expect.fail('expected REPOSITORY_BINDING_MISMATCH');
+    } catch (error) {
+      expect((error as DomainError).code).toBe('REPOSITORY_BINDING_MISMATCH');
+    }
+  });
+
+  it('infers repository binding only when existing tasks agree', () => {
+    const opened = openTempStore();
+    dirs.push(opened.dir);
+    opened.store.close();
+    const path = join(opened.dir, 'ledger.sqlite');
+    const unbound = Store.open(path);
+    unbound.insertTask(sampleTask({ id: 'repo-a-task', repo_root: 'repo-a' }));
+    unbound.close();
+
+    const bound = Store.open(path, { repoRoot: 'repo-a' });
+    expect(bound.repositoryRoot).toBe('repo-a');
+    bound.close();
+    expect(() => Store.open(path, { repoRoot: 'repo-b' })).toThrow(DomainError);
+  });
+
+  it('rejects ownerless RUNNING rows at the database layer', () => {
+    const opened = openTempStore();
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    expect(() =>
+      opened.store.insertTask(sampleTask({ status: 'RUNNING', assignee_role: 'JUNIOR' })),
+    ).toThrow(/EXECUTION_STATE_INVARIANT_VIOLATION/);
+  });
+
+  it('rejects non-RUNNING rows that retain an execution owner', () => {
+    const opened = openTempStore();
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    expect(() =>
+      opened.store.insertTask(
+        sampleTask({
+          id: 'completed-with-owner',
+          status: 'COMPLETED',
+          assignee_role: 'JUNIOR',
+          execution_instance_id: 'stale-owner',
+        }),
+      ),
+    ).toThrow(/EXECUTION_STATE_INVARIANT_VIOLATION/);
+  });
+
+  it('rejects a legacy-style update from RUNNING/owner to COMPLETED/owner', () => {
+    const opened = openTempStore();
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    const task = sampleTask({
+      status: 'RUNNING',
+      assignee_role: 'JUNIOR',
+      execution_instance_id: 'current-owner',
+    });
+    opened.store.insertTask(task);
+    expect(() =>
+      opened.store.updateTask({
+        ...task,
+        status: 'COMPLETED',
+        execution_instance_id: 'current-owner',
+        revision: 2,
+      }),
+    ).toThrow(/EXECUTION_STATE_INVARIANT_VIOLATION/);
+    const after = opened.store.getTask(task.id);
+    expect(after?.status).toBe('RUNNING');
+    expect(after?.execution_instance_id).toBe('current-owner');
+  });
+
+  it('accepts valid execution ownership transitions at the database layer', () => {
+    const opened = openTempStore();
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    const ready = sampleTask({ id: 'valid-task' });
+    opened.store.insertTask(ready);
+    const running = {
+      ...ready,
+      status: 'RUNNING' as const,
+      assignee_role: 'JUNIOR' as const,
+      execution_instance_id: 'current-owner',
+      revision: 2,
+    };
+    opened.store.updateTask(running);
+    expect(opened.store.getTask(ready.id)?.status).toBe('RUNNING');
+    expect(opened.store.getTask(ready.id)?.execution_instance_id).toBe('current-owner');
+
+    const completed = {
+      ...running,
+      status: 'COMPLETED' as const,
+      execution_instance_id: null,
+      result: null,
+      revision: 3,
+    };
+    opened.store.updateTask(completed);
+    expect(opened.store.getTask(ready.id)?.status).toBe('COMPLETED');
+    expect(opened.store.getTask(ready.id)?.execution_instance_id).toBeNull();
+  });
+
+  it('refuses migration when a legacy RUNNING task exists', () => {
+    const opened = openTempStore();
+    dirs.push(opened.dir);
+    opened.store.close();
+    const path = join(opened.dir, 'legacy-running.sqlite');
+    const raw = new DatabaseSync(path);
+    raw.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        owner_role TEXT NOT NULL,
+        assignee_role TEXT,
+        repo_root TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        result_json TEXT,
+        blocker_json TEXT,
+        revision INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX one_running_task ON tasks(status) WHERE status = 'RUNNING';
+      CREATE TABLE task_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        at TEXT NOT NULL,
+        actor_role TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        from_status TEXT,
+        to_status TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        detail_json TEXT
+      ) STRICT;
+    `);
+    raw.prepare(`
+      INSERT INTO tasks (
+        id, type, status, owner_role, assignee_role, repo_root, base_commit, branch,
+        payload_json, result_json, blocker_json, revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'legacy-running',
+      'IMPLEMENTATION',
+      'RUNNING',
+      'OWNER',
+      'JUNIOR',
+      'repo-a',
+      'aaa',
+      'main',
+      JSON.stringify(implPayload),
+      null,
+      null,
+      2,
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-01T00:00:00.000Z',
+    );
+    raw.exec(`PRAGMA user_version = 1`);
+    raw.close();
+
+    try {
+      Store.open(path, { repoRoot: 'repo-a' });
+      expect.fail('expected migration to fail closed');
+    } catch (error) {
+      expect((error as DomainError).code).toBe('LEGACY_RUNNING_TASK_PREVENTS_MIGRATION');
+    }
   });
 });

@@ -57,7 +57,7 @@ export function requireCleanBaseline(git: GitSnapshot): void {
   }
 }
 
-function requireSameRepository(git: GitSnapshot, expectedRoot: string): void {
+export function requireSameRepository(git: GitSnapshot, expectedRoot: string): void {
   if (git.repoRoot !== expectedRoot) {
     throw new DomainError(
       'REPOSITORY_MISMATCH',

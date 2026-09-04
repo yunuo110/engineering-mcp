@@ -1,6 +1,6 @@
 import { z } from 'zod/v4';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 3;
 export const BUSY_TIMEOUT_MS = 5000;
 
 export const ROLES = ['OWNER', 'JUNIOR', 'PRINCIPAL'] as const;
@@ -158,11 +158,26 @@ export const blockerReasonSchema = z.enum([
   'OTHER',
 ]);
 
-export const blockerSchema = z.object({
+export const recoveryMetadataSchema = z.object({
+  reason: z.enum(['SERVER_RESTART', 'EXPLICIT_OWNER_RECOVERY']),
+  previous_status: z.literal('RUNNING'),
+  detected_at: z.string().min(1),
+  detected_by_role: roleSchema,
+  retry_safe: z.boolean(),
+  prior_execution_instance_id: z.string().optional(),
+});
+export type RecoveryMetadata = z.infer<typeof recoveryMetadataSchema>;
+
+const blockerFieldsSchema = z.object({
   reason: blockerReasonSchema,
   summary: z.string().min(1),
   need_from_owner: z.string().min(1),
   evidence_refs: z.array(z.string()),
+});
+
+export const workerBlockerSchema = blockerFieldsSchema;
+export const blockerSchema = blockerFieldsSchema.extend({
+  recovery: recoveryMetadataSchema.optional(),
 });
 export type Blocker = z.infer<typeof blockerSchema>;
 
@@ -172,6 +187,7 @@ export const taskContractSchema = z.object({
   status: taskStatusSchema,
   owner_role: z.literal('OWNER'),
   assignee_role: assigneeRoleSchema.nullable(),
+  execution_instance_id: z.string().nullable(),
   repo_root: z.string().min(1),
   base_commit: z.string().min(1),
   branch: z.string().min(1),
@@ -215,6 +231,8 @@ export const listActiveTasksInputSchema = z.object({
 
 export const claimTaskInputSchema = taskIdRevisionSchema;
 
+export const claimNextTaskInputSchema = z.object({});
+
 export const reportResultInputSchema = z.object({
   task_id: z.string().min(1),
   revision: z.number().int().positive(),
@@ -226,7 +244,7 @@ export type ReportResultInput = z.infer<typeof reportResultInputSchema>;
 export const reportBlockedInputSchema = z.object({
   task_id: z.string().min(1),
   revision: z.number().int().positive(),
-  blocker: blockerSchema,
+  blocker: workerBlockerSchema,
 });
 export type ReportBlockedInput = z.infer<typeof reportBlockedInputSchema>;
 
@@ -236,6 +254,9 @@ export const resumeTaskInputSchema = z.object({
   payload: taskPayloadSchema.optional(),
 });
 export type ResumeTaskInput = z.infer<typeof resumeTaskInputSchema>;
+
+export const recoverTaskInputSchema = taskIdRevisionSchema;
+export type RecoverTaskInput = z.infer<typeof recoverTaskInputSchema>;
 
 export const cancelTaskInputSchema = z.object({
   task_id: z.string().min(1),

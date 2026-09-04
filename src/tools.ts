@@ -3,11 +3,13 @@ import { inspectRepo } from './git.ts';
 import { isDomainError } from './errors.ts';
 import {
   cancelTask,
+  claimNextTask,
   claimTask,
   closeTask,
   createTask,
   getTask,
   listActiveTasks,
+  recoverTask,
   reportBlocked,
   resumeTask,
   reportResult,
@@ -16,6 +18,7 @@ import { toolsForProcessRole } from './role.ts';
 import type { Store } from './store.ts';
 import {
   cancelTaskInputSchema,
+  claimNextTaskInputSchema,
   claimTaskInputSchema,
   closeTaskInputSchema,
   createTaskInputSchema,
@@ -23,6 +26,7 @@ import {
   listActiveTasksInputSchema,
   listToolOutputSchema,
   processRoleToRole,
+  recoverTaskInputSchema,
   reportBlockedInputSchema,
   reportResultInputSchema,
   resumeTaskInputSchema,
@@ -35,6 +39,7 @@ export type ServerConfig = {
   processRole: ProcessRole;
   repoPath: string;
   store: Store;
+  executionInstanceId: string;
 };
 
 function taskText(prefix: string, task: TaskContract): string {
@@ -78,6 +83,7 @@ function fail(error: unknown) {
 export function registerRoleTools(server: McpServer, config: ServerConfig): void {
   const allowed = new Set(toolsForProcessRole(config.processRole));
   const actor = processRoleToRole(config.processRole);
+  config.store.bindRepository(config.repoPath);
 
   if (allowed.has('create_task')) {
     server.registerTool(
@@ -158,7 +164,29 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
       (args) => {
         try {
           const git = inspectRepo(config.repoPath);
-          const task = claimTask(config.store, git, actor, args.task_id, args.revision);
+          const task = claimTask(config.store, git, actor, config.executionInstanceId, args.task_id, args.revision);
+          return okTask('Claimed', task);
+        } catch (error) {
+          return fail(error);
+        }
+      },
+    );
+  }
+
+  if (allowed.has('claim_next_task')) {
+    server.registerTool(
+      'claim_next_task',
+      {
+        title: 'Claim next task',
+        description:
+          'Atomically claim the oldest READY task of this worker type. Returns the complete Task Contract.',
+        inputSchema: claimNextTaskInputSchema,
+        outputSchema: taskToolOutputSchema,
+      },
+      () => {
+        try {
+          const git = inspectRepo(config.repoPath);
+          const task = claimNextTask(config.store, git, actor, config.executionInstanceId);
           return okTask('Claimed', task);
         } catch (error) {
           return fail(error);
@@ -178,7 +206,7 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
       },
       (args) => {
         try {
-          const task = reportResult(config.store, actor, args);
+          const task = reportResult(config.store, actor, config.executionInstanceId, args);
           return okTask('Reported', task);
         } catch (error) {
           return fail(error);
@@ -198,8 +226,30 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
       },
       (args) => {
         try {
-          const task = reportBlocked(config.store, actor, args);
+          const task = reportBlocked(config.store, actor, config.executionInstanceId, args);
           return okTask('Blocked', task);
+        } catch (error) {
+          return fail(error);
+        }
+      },
+    );
+  }
+
+  if (allowed.has('recover_task')) {
+    server.registerTool(
+      'recover_task',
+      {
+        title: 'Recover task',
+        description:
+          'OWNER-only explicit recovery: move a RUNNING task to BLOCKED and clear its execution owner.',
+        inputSchema: recoverTaskInputSchema,
+        outputSchema: taskToolOutputSchema,
+      },
+      (args) => {
+        try {
+          const git = inspectRepo(config.repoPath);
+          const task = recoverTask(config.store, git, args);
+          return okTask('Recovered', task);
         } catch (error) {
           return fail(error);
         }

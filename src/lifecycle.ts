@@ -10,6 +10,7 @@ import {
   nowIso,
   type CreateTaskInput,
   type GitSnapshot,
+  type RecoverTaskInput,
   type ReportBlockedInput,
   type ReportResultInput,
   type ResumeTaskInput,
@@ -19,7 +20,12 @@ import {
   type TaskStatus,
   type TaskType,
 } from './types.ts';
-import { requireClaimBaseline, requireCleanBaseline, requireResumeBaseline } from './git.ts';
+import {
+  requireClaimBaseline,
+  requireCleanBaseline,
+  requireResumeBaseline,
+  requireSameRepository,
+} from './git.ts';
 
 const RESUMABLE: ReadonlySet<TaskStatus> = new Set(['BLOCKED', 'FAILED', 'COMPLETED']);
 const CANCELLABLE: ReadonlySet<TaskStatus> = new Set([
@@ -80,6 +86,19 @@ function requireAssignedWorker(task: TaskContract, actor: Role): void {
   }
 }
 
+function requireExecutionOwner(task: TaskContract, actor: Role, executionInstanceId: string): void {
+  if (!isWorkerRole(actor) || task.assignee_role !== actor) {
+    throw new DomainError('NOT_ASSIGNED', `Task ${task.id} is not assigned to ${actor}`);
+  }
+  if (task.execution_instance_id !== executionInstanceId) {
+    throw new DomainError(
+      'EXECUTION_OWNER_MISMATCH',
+      `Task ${task.id} is owned by another execution instance`,
+      { task_id: task.id },
+    );
+  }
+}
+
 export function createTask(
   store: Store,
   git: GitSnapshot,
@@ -93,6 +112,7 @@ export function createTask(
     status: 'READY',
     owner_role: 'OWNER',
     assignee_role: null,
+    execution_instance_id: null,
     repo_root: git.repoRoot,
     base_commit: git.head,
     branch: git.branch,
@@ -139,6 +159,7 @@ export function claimTask(
   store: Store,
   git: GitSnapshot,
   actor: Role,
+  executionInstanceId: string,
   taskId: string,
   revision: number,
 ): TaskContract {
@@ -178,6 +199,7 @@ export function claimTask(
       ...task,
       status: 'RUNNING',
       assignee_role: actor === 'JUNIOR' ? 'JUNIOR' : 'PRINCIPAL',
+      execution_instance_id: executionInstanceId,
       revision: task.revision + 1,
       updated_at: timestamp,
     };
@@ -190,6 +212,74 @@ export function claimTask(
       from_status: 'READY',
       to_status: 'RUNNING',
       revision: next.revision,
+      detail: { execution_instance_id: next.execution_instance_id },
+    });
+    return next;
+  });
+}
+
+function typeForWorker(actor: Role): TaskType {
+  if (actor === 'JUNIOR') {
+    return 'IMPLEMENTATION';
+  }
+  if (actor === 'PRINCIPAL') {
+    return 'DIAGNOSIS';
+  }
+  throw new DomainError(
+    'ROLE_FORBIDDEN',
+    `Only workers can claim the next task; ${actor} cannot claim`,
+  );
+}
+
+export function claimNextTask(
+  store: Store,
+  git: GitSnapshot,
+  actor: Role,
+  executionInstanceId: string,
+): TaskContract {
+  return store.transact(() => {
+    const type = typeForWorker(actor);
+    const running = store.getRunning();
+    if (running) {
+      throw new DomainError(
+        'TASK_ALREADY_RUNNING',
+        `Task ${running.id} is already RUNNING`,
+        { running_task_id: running.id, running_type: running.type },
+      );
+    }
+    const task = store.getNextReady(type);
+    if (!task) {
+      throw new DomainError(
+        'NO_PENDING_TASK',
+        `No READY ${type} task is waiting to be claimed`,
+        { type },
+      );
+    }
+    requireClaimBaseline(git, {
+      repo_root: task.repo_root,
+      branch: task.branch,
+      base_commit: task.base_commit,
+    });
+
+    const timestamp = nowIso();
+    const next: TaskContract = {
+      ...task,
+      status: 'RUNNING',
+      assignee_role: actor === 'JUNIOR' ? 'JUNIOR' : 'PRINCIPAL',
+      execution_instance_id: executionInstanceId,
+      revision: task.revision + 1,
+      updated_at: timestamp,
+    };
+    store.updateTask(next);
+    store.insertEvent({
+      task_id: next.id,
+      at: timestamp,
+      actor_role: actor,
+      kind: 'claimed',
+      from_status: 'READY',
+      to_status: 'RUNNING',
+      revision: next.revision,
+      detail: { execution_instance_id: next.execution_instance_id },
     });
     return next;
   });
@@ -198,12 +288,13 @@ export function claimTask(
 export function reportResult(
   store: Store,
   actor: Role,
+  executionInstanceId: string,
   input: ReportResultInput,
 ): TaskContract {
   return store.transact(() => {
     const task = requireTask(store, input.task_id);
     requireRevision(task, input.revision);
-    requireAssignedWorker(task, actor);
+    requireExecutionOwner(task, actor, executionInstanceId);
     if (task.status !== 'RUNNING') {
       throw new DomainError(
         'ILLEGAL_TRANSITION',
@@ -217,6 +308,7 @@ export function reportResult(
     const next: TaskContract = {
       ...task,
       status: nextStatus,
+      execution_instance_id: null,
       result,
       blocker: null,
       revision: task.revision + 1,
@@ -240,12 +332,13 @@ export function reportResult(
 export function reportBlocked(
   store: Store,
   actor: Role,
+  executionInstanceId: string,
   input: ReportBlockedInput,
 ): TaskContract {
   return store.transact(() => {
     const task = requireTask(store, input.task_id);
     requireRevision(task, input.revision);
-    requireAssignedWorker(task, actor);
+    requireExecutionOwner(task, actor, executionInstanceId);
     if (task.status !== 'RUNNING') {
       throw new DomainError(
         'ILLEGAL_TRANSITION',
@@ -257,6 +350,7 @@ export function reportBlocked(
     const next: TaskContract = {
       ...task,
       status: 'BLOCKED',
+      execution_instance_id: null,
       blocker: input.blocker,
       revision: task.revision + 1,
       updated_at: timestamp,
@@ -271,6 +365,65 @@ export function reportBlocked(
       to_status: 'BLOCKED',
       revision: next.revision,
       detail: { blocker: input.blocker },
+    });
+    return next;
+  });
+}
+
+export function recoverTask(
+  store: Store,
+  git: GitSnapshot,
+  input: RecoverTaskInput,
+): TaskContract {
+  return store.transact(() => {
+    const task = requireTask(store, input.task_id);
+    requireRevision(task, input.revision);
+    if (task.status !== 'RUNNING') {
+      throw new DomainError(
+        'INVALID_RECOVERY_STATE',
+        `Cannot recover task in status ${task.status}; only RUNNING tasks can be explicitly recovered`,
+        { task_id: task.id, status: task.status },
+      );
+    }
+    requireSameRepository(git, task.repo_root);
+
+    const timestamp = nowIso();
+    const blocker = {
+      reason: 'CONTEXT_STALE' as const,
+      summary: `OWNER explicitly recovered a RUNNING task at ${timestamp}; no completion was reported.`,
+      need_from_owner: 'Inspect repository state, then resume or cancel this task.',
+      evidence_refs: [],
+      recovery: {
+        reason: 'EXPLICIT_OWNER_RECOVERY' as const,
+        previous_status: 'RUNNING' as const,
+        detected_at: timestamp,
+        detected_by_role: 'OWNER' as const,
+        retry_safe: false,
+        prior_execution_instance_id: task.execution_instance_id ?? undefined,
+      },
+    };
+    const next: TaskContract = {
+      ...task,
+      status: 'BLOCKED',
+      execution_instance_id: null,
+      blocker,
+      revision: task.revision + 1,
+      updated_at: timestamp,
+    };
+    store.updateTask(next);
+    store.insertEvent({
+      task_id: next.id,
+      at: timestamp,
+      actor_role: 'OWNER',
+      kind: 'blocked',
+      from_status: 'RUNNING',
+      to_status: 'BLOCKED',
+      revision: next.revision,
+      detail: {
+        recovery: blocker.recovery,
+        prior_execution_instance_id: task.execution_instance_id,
+        blocker: next.blocker,
+      },
     });
     return next;
   });
@@ -300,6 +453,7 @@ export function resumeTask(
       ...task,
       status: 'READY',
       assignee_role: null,
+      execution_instance_id: null,
       base_commit: git.head,
       payload,
       result: null,
@@ -349,6 +503,7 @@ export function cancelTask(
     const next: TaskContract = {
       ...task,
       status: 'CANCELLED',
+      execution_instance_id: null,
       revision: task.revision + 1,
       updated_at: timestamp,
     };
@@ -387,6 +542,7 @@ export function closeTask(
     const next: TaskContract = {
       ...task,
       status: 'CLOSED',
+      execution_instance_id: null,
       revision: task.revision + 1,
       updated_at: timestamp,
     };

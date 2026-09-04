@@ -8,10 +8,13 @@ import {
   initGitRepo,
   openTempStore,
   removeDir,
+  snapshot,
   type Connected,
 } from './helpers.ts';
+import { claimTask, createTask } from '../src/lifecycle.ts';
 import type { Store } from '../src/store.ts';
 
+const DIRECT_INSTANCE = 'direct-instance';
 const dirs: string[] = [];
 const stores: Store[] = [];
 const connections: Connected[] = [];
@@ -54,6 +57,7 @@ describe('role-filtered tools', () => {
       'create_task',
       'get_task',
       'list_active_tasks',
+      'recover_task',
       'resume_task',
     ]);
   });
@@ -69,7 +73,13 @@ describe('role-filtered tools', () => {
     connections.push(junior, principal);
     const juniorTools = (await junior.client.listTools()).tools.map((tool) => tool.name).sort();
     const principalTools = (await principal.client.listTools()).tools.map((tool) => tool.name).sort();
-    expect(juniorTools).toEqual(['claim_task', 'get_task', 'report_blocked', 'report_result']);
+    expect(juniorTools).toEqual([
+      'claim_next_task',
+      'claim_task',
+      'get_task',
+      'report_blocked',
+      'report_result',
+    ]);
     expect(principalTools).toEqual(juniorTools);
   });
 
@@ -137,5 +147,127 @@ describe('role-filtered tools', () => {
       },
     });
     expect(structured(reported).ok).toBe(true);
+  });
+
+  it('claims the oldest pending task through claim_next_task without leaking queue visibility', async () => {
+    const { repo, db, owner } = await ownerSession();
+    const first = await owner.client.callTool({
+      name: 'create_task',
+      arguments: { type: 'IMPLEMENTATION', payload: implPayload },
+    });
+    const firstTask = structured(first).task as { id: string };
+    const second = await owner.client.callTool({
+      name: 'create_task',
+      arguments: { type: 'IMPLEMENTATION', payload: { ...implPayload, goal: 'Second goal' } },
+    });
+    const secondTask = structured(second).task as { id: string };
+
+    const junior = await connectInProcess('junior', repo, db);
+    connections.push(junior);
+    const claimed = await junior.client.callTool({
+      name: 'claim_next_task',
+      arguments: {},
+    });
+    expect(claimed.isError).toBeFalsy();
+    expect((structured(claimed).task as { id: string; status: string }).id).toBe(firstTask.id);
+    expect((structured(claimed).task as { status: string }).status).toBe('RUNNING');
+
+    const peekSecond = await junior.client.callTool({
+      name: 'get_task',
+      arguments: { task_id: secondTask.id },
+    });
+    expect(peekSecond.isError).toBe(true);
+    expect((structured(peekSecond).error as { code: string }).code).toBe('NOT_ASSIGNED');
+  });
+
+  it('does not auto-recover a RUNNING task when an owner server starts', async () => {
+    const repo = initGitRepo();
+    dirs.push(repo);
+    const opened = openTempStore();
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    const git = snapshot(repo);
+    const created = createTask(opened.store, git, { type: 'IMPLEMENTATION', payload: implPayload });
+    const claimed = claimTask(opened.store, git, 'JUNIOR', DIRECT_INSTANCE, created.id, created.revision);
+    expect(claimed.status).toBe('RUNNING');
+    const eventsBefore = opened.store.listEvents(created.id).length;
+
+    const owner = await connectInProcess('owner', repo, opened.store);
+    connections.push(owner);
+    const active = await owner.client.callTool({
+      name: 'list_active_tasks',
+      arguments: {},
+    });
+    const body = structured(active);
+    const tasks = body.tasks as Array<{
+      id: string;
+      status: string;
+      execution_instance_id: string | null;
+      blocker: { reason: string; recovery?: { reason: string } } | null;
+    }>;
+    const task = tasks.find((item) => item.id === created.id);
+    expect(task?.status).toBe('RUNNING');
+    expect(task?.execution_instance_id).toBe(DIRECT_INSTANCE);
+    expect(task?.blocker).toBeNull();
+    expect(opened.store.listEvents(created.id)).toHaveLength(eventsBefore);
+  });
+
+  it('does not auto-recover a RUNNING task when a junior server starts', async () => {
+    const repo = initGitRepo();
+    dirs.push(repo);
+    const opened = openTempStore();
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    const git = snapshot(repo);
+    const created = createTask(opened.store, git, { type: 'IMPLEMENTATION', payload: implPayload });
+    claimTask(opened.store, git, 'JUNIOR', DIRECT_INSTANCE, created.id, created.revision);
+
+    const junior = await connectInProcess('junior', repo, opened.store);
+    connections.push(junior);
+    const got = await junior.client.callTool({
+      name: 'get_task',
+      arguments: { task_id: created.id },
+    });
+    const task = structured(got).task as {
+      status: string;
+      execution_instance_id: string | null;
+      blocker: null | { reason: string };
+    };
+    expect(task.status).toBe('RUNNING');
+    expect(task.execution_instance_id).toBe(DIRECT_INSTANCE);
+    expect(task.blocker).toBeNull();
+  });
+
+  it('lets an OWNER explicitly recover a RUNNING task through recover_task', async () => {
+    const { repo, db, owner } = await ownerSession();
+    const created = await owner.client.callTool({
+      name: 'create_task',
+      arguments: { type: 'IMPLEMENTATION', payload: implPayload },
+    });
+    const createdTask = structured(created).task as { id: string; revision: number };
+    const junior = await connectInProcess('junior', repo, db);
+    connections.push(junior);
+    const claimed = await junior.client.callTool({
+      name: 'claim_task',
+      arguments: { task_id: createdTask.id, revision: createdTask.revision },
+    });
+    const running = structured(claimed).task as { id: string; revision: number; status: string };
+    expect(running.status).toBe('RUNNING');
+
+    const recovered = await owner.client.callTool({
+      name: 'recover_task',
+      arguments: { task_id: running.id, revision: running.revision },
+    });
+    expect(recovered.isError).toBeFalsy();
+    const recoveredTask = structured(recovered).task as {
+      status: string;
+      execution_instance_id: string | null;
+      blocker: { reason: string; recovery?: { reason: string; retry_safe: boolean } };
+    };
+    expect(recoveredTask.status).toBe('BLOCKED');
+    expect(recoveredTask.execution_instance_id).toBeNull();
+    expect(recoveredTask.blocker.reason).toBe('CONTEXT_STALE');
+    expect(recoveredTask.blocker.recovery?.reason).toBe('EXPLICIT_OWNER_RECOVERY');
+    expect(recoveredTask.blocker.recovery?.retry_safe).toBe(false);
   });
 });

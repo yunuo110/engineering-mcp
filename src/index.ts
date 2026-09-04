@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
@@ -45,7 +46,8 @@ function main(): void {
   const git = inspectRepo(values.repo);
   const repoPath = git.repoRoot;
   const dbPath = values.db ? realpathOrCreate(values.db) : defaultLedgerPath(repoPath);
-  const store = Store.open(dbPath);
+  const executionInstanceId = randomUUID();
+  const store = Store.open(dbPath, { repoRoot: repoPath });
 
   const closeStore = (): void => {
     store.close();
@@ -59,6 +61,7 @@ function main(): void {
         processRole,
         repoPath,
         store,
+        executionInstanceId,
       }),
     {
       onerror: (error) => {
