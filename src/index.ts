@@ -6,6 +6,7 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { defaultLedgerPath } from './db-path.ts';
 import { DomainError } from './errors.ts';
 import { inspectRepo } from './git.ts';
+import { resolveRepository, type RepositoryResolution } from './repository-resolver.ts';
 import { createEngineeringServer } from './server.ts';
 import { Store } from './store.ts';
 import { PROCESS_ROLES, type ProcessRole } from './types.ts';
@@ -39,12 +40,17 @@ function main(): void {
   }
 
   const processRole = parseProcessRole(values.role);
-  if (!values.repo) {
-    throw new DomainError('USAGE', 'Launch with --repo <target-repository-path>.');
+  if (!values.role) {
+    throw new DomainError('USAGE', 'Launch with --role owner|junior|principal. Role is process identity.');
   }
 
-  const git = inspectRepo(values.repo);
-  const repoPath = git.repoRoot;
+  const resolution: RepositoryResolution = resolveRepository({
+    arg: values.repo,
+    envRepo: process.env.ENGINEERING_MCP_REPO,
+    cwd: process.cwd(),
+  });
+  const repoPath = resolution.repoRoot;
+  const git = inspectRepo(repoPath);
   const dbPath = values.db ? realpathOrCreate(values.db) : defaultLedgerPath(repoPath);
   const executionInstanceId = randomUUID();
   const store = Store.open(dbPath, { repoRoot: repoPath });

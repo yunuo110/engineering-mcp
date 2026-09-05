@@ -23,6 +23,7 @@ export const DOMAIN_ERROR_CODES = [
   'INVALID_PAYLOAD',
   'GIT_NOT_A_REPO',
   'GIT_COMMAND_FAILED',
+  'REPOSITORY_NOT_FOUND',
   'USAGE',
 ] as const;
 
