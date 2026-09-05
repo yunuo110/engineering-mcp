@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { GenericCliAdapter } from '../src/adapters/generic-cli-adapter.ts';
+import { GenericCliAdapter, promptWrapper } from '../src/adapters/generic-cli-adapter.ts';
 import { buildWorkerRequest, ewpRequestSchema, ewpResultSchema } from '../src/adapters/ewp.ts';
 import { cliAdapterManifestSchema, validateManifest, expandTrustedVariables } from '../src/adapters/manifest.ts';
 import type { TaskContract } from '../src/types.ts';
@@ -128,6 +128,40 @@ describe('Generic CLI adapter manifest', () => {
   it('expands only allowed trusted variables', () => {
     expect(expandTrustedVariables('${repo_root}/${task_id}', { repo_root: 'r', task_id: 't' })).toBe('r/t');
     expect(() => expandTrustedVariables('${goal}', {})).toThrow();
+  });
+});
+
+describe('prompt-wrapper contract', () => {
+  const request = JSON.stringify({ protocol: 'engineering-worker/1', request_id: 'r', task: { id: 't' }, repository: { root: 'r', base_commit: 'c' }, worker: { role: 'JUNIOR' } });
+  const prompt = promptWrapper('prompt-wrapper', request);
+
+  it('distinguishes REQUEST from TERMINAL RESULT', () => {
+    expect(prompt).toContain('REQUEST');
+    expect(prompt).toContain('TERMINAL RESULT');
+    expect(prompt).toContain('Do not echo, mutate, or return it');
+  });
+
+  it('documents required result keys and forbids request envelope fields', () => {
+    expect(prompt).toContain('protocol');
+    expect(prompt).toContain('outcome');
+    expect(prompt).toContain('summary');
+    expect(prompt).toContain('changed_files');
+    expect(prompt).toContain('validation');
+    expect(prompt).toContain('known_limitations');
+    expect(prompt).toContain('exit_code');
+    expect(prompt).toContain('request_id, task, repository, worker');
+  });
+
+  it('contains exact completed result example and JSON-only rules', () => {
+    expect(prompt).toContain('"outcome":"completed"'.replace(/"/g, '"'));
+    expect(prompt).toContain('"changed_files":["relative/path"]'.replace(/"/g, '"'));
+    expect(prompt).toContain('No Markdown code fences');
+    expect(prompt).toContain('No prose before or after JSON');
+    expect(prompt).not.toContain('```');
+  });
+
+  it('native mode returns raw request JSON', () => {
+    expect(promptWrapper('native', request)).toBe(request);
   });
 });
 

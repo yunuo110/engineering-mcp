@@ -6,6 +6,19 @@ let mode = 'completed';
 const modeIdx = process.argv.indexOf('--mode');
 if (modeIdx >= 0) mode = process.argv[modeIdx + 1] ?? 'completed';
 
+if (mode === 'dsh-request-echo') {
+  const readline = require('node:readline');
+  const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  rl.on('close', () => {
+    process.stdout.write(JSON.stringify({
+      protocol: 'engineering-worker/1',
+      request_id: 'request-echo',
+      task: { status: 'COMPLETED' },
+    }));
+  });
+  return;
+}
+
 const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 let input = '';

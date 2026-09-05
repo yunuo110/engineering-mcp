@@ -25,7 +25,7 @@ function testStore(repo: string): Store {
   return opened.store;
 }
 
-function manifestPath(mode: string): string {
+function manifestPath(mode: string, protocolMode = 'native'): string {
   const dir = tempDir('eng-mcp-generic-manifest-');
   dirs.push(dir);
   const path = `${dir}/generic-harness.yaml`;
@@ -40,7 +40,7 @@ arguments:
   - --mode
   - ${mode}
 working_directory: "\${repo_root}"
-protocol_mode: native
+protocol_mode: ${protocolMode}
 prompt:
   transport: stdin
   format: engineering-worker/1
@@ -203,6 +203,63 @@ describe('Generic CLI Harness real orchestration integration', () => {
     });
     expect(run.status).toBe('blocked');
     expect(run.error_code).toBe('WORKER_PROTOCOL_FAILURE');
+  });
+
+  it('prompt-wrapper fake harness follows strengthened contract and completes', async () => {
+    const repo = initGitRepo();
+    dirs.push(repo);
+    const db = testStore(repo);
+    const git = snapshot(repo);
+    const task = createTask(db, git, {
+      type: 'IMPLEMENTATION',
+      payload: {
+        goal: 'Create hello.txt',
+        parent_intent: 'prompt-wrapper',
+        allowed_scope: ['hello.txt'],
+        forbidden_scope: [],
+        acceptance_criteria: [],
+        validation_requirements: [],
+        context_files: [],
+        knowledge_refs: [],
+        parent_risk: 'L1',
+      },
+    });
+    const run = await delegateTask(db, git, task.id, task.revision, {
+      adapterId: 'generic-cli',
+      manifestPath: manifestPath('completed', 'prompt-wrapper'),
+      timeoutMs: 30_000,
+    });
+    expect(run.status).toBe('completed');
+    expect(db.getTask(task.id)?.status).toBe('COMPLETED');
+  });
+
+  it('prompt-wrapper DSH request-echo still becomes WORKER_PROTOCOL_FAILURE', async () => {
+    const repo = initGitRepo();
+    dirs.push(repo);
+    const db = testStore(repo);
+    const git = snapshot(repo);
+    const task = createTask(db, git, {
+      type: 'IMPLEMENTATION',
+      payload: {
+        goal: 'Create hello.txt',
+        parent_intent: 'prompt-wrapper',
+        allowed_scope: ['hello.txt'],
+        forbidden_scope: [],
+        acceptance_criteria: [],
+        validation_requirements: [],
+        context_files: [],
+        knowledge_refs: [],
+        parent_risk: 'L1',
+      },
+    });
+    const run = await delegateTask(db, git, task.id, task.revision, {
+      adapterId: 'generic-cli',
+      manifestPath: manifestPath('dsh-request-echo', 'prompt-wrapper'),
+      timeoutMs: 30_000,
+    });
+    expect(run.status).toBe('blocked');
+    expect(run.error_code).toBe('WORKER_PROTOCOL_FAILURE');
+    expect(db.getTask(task.id)?.status).toBe('BLOCKED');
   });
 
   it('fails closed on unknown adapter id', async () => {
