@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { inspectRepo } from '../../src/git.ts';
@@ -32,6 +32,31 @@ class FixtureAdapter implements WorkerAdapter {
         outcome: 'completed',
         summary: 'out of scope',
         changed_files: ['README.md', 'outside.txt'],
+        validation: [],
+        known_limitations: [],
+        exit_code: 0,
+      };
+    }
+    if (this.mode === 'forbidden-inside-allowed') {
+      mkdirSync(join(context.repositoryRoot, 'src'), { recursive: true });
+      writeFileSync(join(context.repositoryRoot, 'src', 'public.ts'), 'public\n');
+      writeFileSync(join(context.repositoryRoot, 'src', 'secret.ts'), 'secret\n');
+      return {
+        outcome: 'completed',
+        summary: 'forbidden inside allowed',
+        changed_files: ['src/public.ts', 'src/secret.ts'],
+        validation: [],
+        known_limitations: [],
+        exit_code: 0,
+      };
+    }
+    if (this.mode === 'allowed-sibling-only') {
+      mkdirSync(join(context.repositoryRoot, 'src'), { recursive: true });
+      writeFileSync(join(context.repositoryRoot, 'src', 'public.ts'), 'public\n');
+      return {
+        outcome: 'completed',
+        summary: 'allowed sibling',
+        changed_files: ['src/public.ts'],
         validation: [],
         known_limitations: [],
         exit_code: 0,

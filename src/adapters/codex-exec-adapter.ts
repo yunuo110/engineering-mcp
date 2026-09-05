@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { workerResultSchema } from '../orchestration/types.ts';
 import type { AdapterContext, WorkerAdapter, WorkerResult } from '../orchestration/types.ts';
 import { resolveCodexLauncher, type CodexLaunch } from './codex-launcher.ts';
 
@@ -74,7 +75,9 @@ function parseLastMessage(path: string): WorkerResult | undefined {
     const raw = readFileSync(path, 'utf8').trim();
     const start = raw.indexOf('{');
     if (start < 0) return undefined;
-    return JSON.parse(raw.slice(start)) as WorkerResult;
+    const parsed = JSON.parse(raw.slice(start)) as unknown;
+    const validated = workerResultSchema.safeParse(parsed);
+    return validated.success ? (validated.data as WorkerResult) : undefined;
   } catch {
     return undefined;
   }

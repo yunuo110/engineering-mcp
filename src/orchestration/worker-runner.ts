@@ -1,7 +1,9 @@
+import { execFileSync } from 'node:child_process';
 import { inspectRepo } from '../git.ts';
 import { claimTask, reportBlocked, reportResult } from '../lifecycle.ts';
 import type { Store } from '../store.ts';
 import type { GitSnapshot, TaskContract } from '../types.ts';
+import { workerResultSchema } from './types.ts';
 import type { WorkerAdapter, WorkerResult } from './types.ts';
 
 export type RunnerInput = {
@@ -23,10 +25,20 @@ function changedFilesFromPorcelain(porcelain: string): string[] {
     .filter(Boolean);
 }
 
+function changedFilesFromRepo(repo: string): string[] {
+  const porcelain = execFileSync('git', ['-C', repo, 'status', '--porcelain=v1', '-uall'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  }).trim();
+  return changedFilesFromPorcelain(porcelain);
+}
+
 function isAllowedFile(task: TaskContract, file: string): boolean {
   if (task.type !== 'IMPLEMENTATION') return false;
-  const allowed = (task.payload as { allowed_scope: string[] }).allowed_scope;
-  return allowed.some((scope: string) => file === scope || file.startsWith(`${scope}/`));
+  const { allowed_scope, forbidden_scope } = task.payload as { allowed_scope: string[]; forbidden_scope: string[] };
+  const allowed = allowed_scope.some((scope: string) => file === scope || file.startsWith(`${scope}/`));
+  const forbidden = forbidden_scope.some((scope: string) => file === scope || file.startsWith(`${scope}/`));
+  return allowed && !forbidden;
 }
 
 function resultForWorker(task: TaskContract, result: WorkerResult, git: GitSnapshot) {
@@ -122,8 +134,24 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
     };
   }
 
+  if (workerResult) {
+    const parsed = workerResultSchema.safeParse(workerResult);
+    if (!parsed.success) {
+      errorCode = 'WORKER_PROTOCOL_FAILURE';
+      workerResult = {
+        outcome: 'blocked',
+        summary: 'Worker protocol validation failed',
+        changed_files: [],
+        validation: [],
+        known_limitations: [],
+        blocked_reason: 'WORKER_PROTOCOL_FAILURE',
+        exit_code: workerResult.exit_code ?? 1,
+      };
+    }
+  }
+
   const repoAfter = inspectRepo(input.git.repoRoot);
-  const changedFiles = changedFilesFromPorcelain(repoAfter.porcelain);
+  const changedFiles = changedFilesFromRepo(input.git.repoRoot);
 
   if (workerResult && workerResult.outcome === 'completed') {
     if (repoAfter.head !== claimed.base_commit) {

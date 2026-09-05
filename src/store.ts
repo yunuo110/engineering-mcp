@@ -441,26 +441,20 @@ function validateFencingObjects(db: DatabaseSync): void {
 }
 
 function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
-  const userVersion = Number(pragmaValue(db, 'user_version'));
-  if (userVersion === 0) {
-    db.exec('BEGIN IMMEDIATE');
-    try {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    // Re-read the schema version while holding the write lock so a concurrent
+    // v0 -> current migration is observed before choosing the migration path.
+    const userVersion = Number(pragmaValue(db, 'user_version'));
+
+    if (userVersion === 0) {
       db.exec(CREATE_SCHEMA_SQL);
       createAllFencingTriggers(db);
       if (repoRoot !== undefined) {
         requireRepositoryBinding(db, repoRoot);
       }
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-      db.exec('COMMIT');
-    } catch (error) {
-      if (db.isTransaction) {
-        db.exec('ROLLBACK');
-      }
-      throw error;
-    }
-  } else if (userVersion === 1 || userVersion === 2 || userVersion === 3 || userVersion === 4 || userVersion === 5) {
-    db.exec('BEGIN IMMEDIATE');
-    try {
+    } else if (userVersion === 1 || userVersion === 2 || userVersion === 3 || userVersion === 4 || userVersion === 5) {
       if (userVersion === 1) {
         const running = db
           .prepare(`SELECT COUNT(*) AS count FROM tasks WHERE status = 'RUNNING'`)
@@ -540,45 +534,36 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
       validateWriterGenerationRows(db);
       createAllFencingTriggers(db);
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-      db.exec('COMMIT');
-    } catch (error) {
-      if (db.isTransaction) {
-        db.exec('ROLLBACK');
-      }
-      throw error;
-    }
-  } else if (userVersion === SCHEMA_VERSION) {
-    if (repoRoot !== undefined) {
-      db.exec('BEGIN IMMEDIATE');
-      try {
+    } else if (userVersion === SCHEMA_VERSION) {
+      if (repoRoot !== undefined) {
         requireRepositoryBinding(db, repoRoot);
-        validateTaskRepositoryRoots(db);
-        validateWriterGenerationRows(db);
-        db.exec('COMMIT');
-      } catch (error) {
-        if (db.isTransaction) {
-          db.exec('ROLLBACK');
+      } else {
+        const metadata = db
+          .prepare(`SELECT value FROM ledger_metadata WHERE key = 'repository_root'`)
+          .get() as { value: string } | undefined;
+        if (!metadata) {
+          throw new DomainError(
+            'REPOSITORY_BINDING_MISMATCH',
+            'Current schema ledger is missing repository binding metadata',
+          );
         }
-        throw error;
-      }
-    } else {
-      const metadata = db
-        .prepare(`SELECT value FROM ledger_metadata WHERE key = 'repository_root'`)
-        .get() as { value: string } | undefined;
-      if (!metadata) {
-        throw new DomainError(
-          'REPOSITORY_BINDING_MISMATCH',
-          'Current schema ledger is missing repository binding metadata',
-        );
       }
       validateTaskRepositoryRoots(db);
+      validateWriterGenerationRows(db);
+    } else {
+      throw new DomainError(
+        'SCHEMA_MISMATCH',
+        `Unsupported schema user_version ${userVersion}; expected ${SCHEMA_VERSION}`,
+        { actual: userVersion, expected: SCHEMA_VERSION },
+      );
     }
-  } else {
-    throw new DomainError(
-      'SCHEMA_MISMATCH',
-      `Unsupported schema user_version ${userVersion}; expected ${SCHEMA_VERSION}`,
-      { actual: userVersion, expected: SCHEMA_VERSION },
-    );
+
+    db.exec('COMMIT');
+  } catch (error) {
+    if (db.isTransaction) {
+      db.exec('ROLLBACK');
+    }
+    throw error;
   }
 
   const journalMode = String(pragmaValue(db, 'journal_mode')).toLowerCase();

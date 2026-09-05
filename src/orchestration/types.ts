@@ -1,3 +1,4 @@
+import { z } from 'zod/v4';
 import type { TaskContract } from '../types.ts';
 
 export const WORKER_OUTCOMES = ['completed', 'blocked'] as const;
@@ -17,6 +18,22 @@ export type WorkerResult = {
   blocked_reason?: string;
   exit_code: number;
 };
+
+export const workerResultSchema = z.object({
+  outcome: z.enum(WORKER_OUTCOMES),
+  summary: z.string().min(1),
+  changed_files: z.array(z.string()),
+  validation: z.array(
+    z.object({
+      check: z.string().min(1),
+      status: z.enum(['passed', 'failed', 'not_run']),
+    }),
+  ),
+  known_limitations: z.array(z.string()),
+  blocked_reason: z.string().optional(),
+  exit_code: z.number().int().nonnegative(),
+});
+export type ValidatedWorkerResult = z.infer<typeof workerResultSchema>;
 
 export type WorkerErrorCode =
   | 'CLAIM_FAILED'

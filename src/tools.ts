@@ -65,7 +65,7 @@ function boundedList(items: string[], limit = 12): string {
   return bounded.join('\n');
 }
 
-function dispatchText(run: unknown, task: TaskContract, git?: GitSnapshot): string {
+function dispatchText(run: unknown, task: TaskContract, git?: GitSnapshot, stillRunning = false): string {
   const r = run as {
     id?: string;
     status?: string;
@@ -81,6 +81,9 @@ function dispatchText(run: unknown, task: TaskContract, git?: GitSnapshot): stri
   lines.push(`Adapter: ${r.adapter_id ?? 'unknown'}`);
   lines.push(`Worker Role: ${r.worker_role ?? 'JUNIOR'}`);
   lines.push(`Dispatch Status: ${r.status ?? 'unknown'}`);
+  if (stillRunning) {
+    lines.push(`DISPATCH_STILL_RUNNING: use await_delegation with Dispatch Run ID ${r.id ?? 'unknown'}`);
+  }
   lines.push(`Task Status: ${task.status}`);
   lines.push(`Task Revision: ${task.revision}`);
   if (task.status === 'COMPLETED' && task.result) {
@@ -95,10 +98,6 @@ function dispatchText(run: unknown, task: TaskContract, git?: GitSnapshot): stri
     if (result.changed_files?.length) lines.push(`Changed Files:\n${boundedList(result.changed_files)}`);
     const validation = result.validation ?? [];
     lines.push(`Validation: ${validation.map((v) => `${v.check ?? '?'}=${v.status ?? '?'}`).join(', ') || 'none'}`);
-    lines.push(`Working Tree Clean: ${result.working_tree_status?.clean ?? 'unknown'}`);
-    if (result.working_tree_status?.porcelain) {
-      lines.push(`Working Tree Porcelain:\n${boundedList(result.working_tree_status.porcelain.split('\n'))}`);
-    }
   }
   if (task.status === 'BLOCKED' && task.blocker) {
     lines.push(`Outcome: blocked`);
@@ -115,16 +114,16 @@ function dispatchText(run: unknown, task: TaskContract, git?: GitSnapshot): stri
   lines.push(`HEAD Before: ${task.base_commit}`);
   if (git) {
     lines.push(`HEAD After: ${git.head}`);
-    lines.push(`Working Tree Clean: ${git.clean}`);
-    if (git.porcelain) lines.push(`Working Tree Porcelain:\n${boundedList(git.porcelain.split('\n'))}`);
+    lines.push(`Final Working Tree Clean: ${git.clean}`);
+    if (git.porcelain) lines.push(`Final Working Tree Porcelain:\n${boundedList(git.porcelain.split('\n'))}`);
   }
   return lines.join('\n');
 }
 
-function okDispatch(run: unknown, task: TaskContract, git?: GitSnapshot) {
+function okDispatch(run: unknown, task: TaskContract, git?: GitSnapshot, stillRunning = false) {
   return {
-    content: [{ type: 'text' as const, text: dispatchText(run, task, git) }],
-    structuredContent: { ok: true as const, dispatch_run: run, task },
+    content: [{ type: 'text' as const, text: dispatchText(run, task, git, stillRunning) }],
+    structuredContent: { ok: true as const, dispatch_run: run, task, ...(stillRunning ? { still_running: true } : {}) },
   };
 }
 
@@ -321,13 +320,15 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
       },
       async (args) => {
         try {
-          const git = inspectRepo(config.repoPath);
-          const run = await delegateTask(config.store, git, args.task_id, args.revision, {
+          const preGit = inspectRepo(config.repoPath);
+          const run = await delegateTask(config.store, preGit, args.task_id, args.revision, {
             adapterId: 'codex-exec-luna',
           });
           const task = config.store.getTask(args.task_id);
           if (!task) throw new Error('task disappeared during delegation');
-          return okDispatch(run, task, git);
+          const postGit = inspectRepo(config.repoPath);
+          const stillRunning = run.status === 'launching' || run.status === 'running';
+          return okDispatch(run, task, postGit, stillRunning);
         } catch (error) {
           return fail(error);
         }
@@ -351,7 +352,8 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
           const task = config.store.getTask(run.task_id);
           if (!task) throw new Error('task disappeared while awaiting delegation');
           const git = inspectRepo(config.repoPath);
-          return okDispatch(run, task, git);
+          const stillRunning = run.status === 'launching' || run.status === 'running';
+          return okDispatch(run, task, git, stillRunning);
         } catch (error) {
           return fail(error);
         }

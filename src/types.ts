@@ -284,6 +284,7 @@ export const dispatchToolOutputSchema = z.discriminatedUnion('ok', [
     ok: z.literal(true),
     dispatch_run: z.record(z.string(), z.unknown()),
     task: taskContractSchema,
+    still_running: z.boolean().optional(),
   }),
   failureOutputSchema,
 ]);

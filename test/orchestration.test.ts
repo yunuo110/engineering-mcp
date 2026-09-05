@@ -394,4 +394,80 @@ describe('V1.6 orchestration', () => {
     expect(run.error_code).toBe('WORKER_PROCESS_FAILED');
     expect(db.getTask(task.id)?.status).toBe('BLOCKED');
   });
+
+  it('blocks when a forbidden path inside allowed scope is changed', async () => {
+    const repo = initGitRepo();
+    dirs.push(repo);
+    const db = testStore(repo);
+    const git = snapshot(repo);
+    const payload = { ...implPayload, allowed_scope: ['src'], forbidden_scope: ['src/secret.ts'] };
+    const task = createTask(db, git, { type: 'IMPLEMENTATION', payload });
+    const fixture = fileURLToPath(new URL('./fixtures/worker-runner-fixture.ts', import.meta.url));
+    const run = await delegateTask(db, git, task.id, task.revision, {
+      adapterId: 'fixture-adapter',
+      runnerEntry: fixture,
+      runnerArgs: ['--mode', 'forbidden-inside-allowed'],
+      timeoutMs: 10_000,
+    });
+    expect(run.status).toBe('blocked');
+    expect(run.error_code).toBe('SCOPE_VIOLATION');
+    expect(db.getTask(task.id)?.status).toBe('BLOCKED');
+  });
+
+  it('allows a changed file inside allowed scope when not forbidden', async () => {
+    const repo = initGitRepo();
+    dirs.push(repo);
+    const db = testStore(repo);
+    const git = snapshot(repo);
+    const payload = { ...implPayload, allowed_scope: ['src'], forbidden_scope: ['src/secret.ts'] };
+    const task = createTask(db, git, { type: 'IMPLEMENTATION', payload });
+    const fixture = fileURLToPath(new URL('./fixtures/worker-runner-fixture.ts', import.meta.url));
+    const run = await delegateTask(db, git, task.id, task.revision, {
+      adapterId: 'fixture-adapter',
+      runnerEntry: fixture,
+      runnerArgs: ['--mode', 'allowed-sibling-only'],
+      timeoutMs: 10_000,
+    });
+    expect(run.status).toBe('completed');
+    expect(db.getTask(task.id)?.status).toBe('COMPLETED');
+  });
+
+  it('blocks structurally invalid WorkerResult from adapter', async () => {
+    const repo = initGitRepo();
+    dirs.push(repo);
+    const db = testStore(repo);
+    const git = snapshot(repo);
+    const task = createTask(db, git, { type: 'IMPLEMENTATION', payload: implPayload });
+    const adapter = new FakeAdapter({ outcome: 'completed', summary: 'missing fields', changed_files: [], validation: [], known_limitations: [] } as unknown as WorkerResult);
+    const run = await delegateTask(db, git, task.id, task.revision, {
+      adapterId: adapter.id,
+      inProcess: true,
+      executionInstanceId: 'strict-runner',
+      adapter,
+    });
+    expect(run.status).toBe('blocked');
+    expect(run.error_code).toBe('WORKER_PROTOCOL_FAILURE');
+    expect(db.getTask(task.id)?.status).toBe('BLOCKED');
+  });
+
+  it('delegate_task returns explicit still-running state when wait times out', async () => {
+    const repo = initGitRepo();
+    dirs.push(repo);
+    const db = testStore(repo);
+    const git = snapshot(repo);
+    const task = createTask(db, git, { type: 'IMPLEMENTATION', payload: implPayload });
+    const fixture = fileURLToPath(new URL('./fixtures/worker-runner-fixture.ts', import.meta.url));
+    const early = await delegateTask(db, git, task.id, task.revision, {
+      adapterId: 'fixture-adapter',
+      runnerEntry: fixture,
+      runnerArgs: ['--mode', 'completed', '--delay', '2000'],
+      wait: true,
+      timeoutMs: 50,
+    });
+    expect(['launching', 'running']).toContain(early.status);
+    expect(db.getActiveDispatchForTask(task.id)?.id).toBe(early.id);
+    const terminal = await waitForDispatch(db, early.id, 10_000);
+    expect(terminal.status).toBe('completed');
+    expect(db.getTask(task.id)?.status).toBe('COMPLETED');
+  });
 });

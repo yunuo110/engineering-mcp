@@ -1,3 +1,5 @@
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { CallToolResult } from '@modelcontextprotocol/client';
 import {
@@ -284,6 +286,55 @@ describe('role-filtered tools', () => {
     expect(text).toContain('Summary:');
   });
 
+  it('delegate/await handback presents one coherent final working tree', async () => {
+    const { repo, db, owner } = await ownerSession();
+    const created = await owner.client.callTool({
+      name: 'create_task',
+      arguments: { type: 'IMPLEMENTATION', payload: implPayload },
+    });
+    const createdTask = structured(created).task as { id: string; revision: number };
+    const git = snapshot(repo);
+    const claimed = claimTask(db, git, 'JUNIOR', 'owner-test-instance', createdTask.id, createdTask.revision);
+    const completed = reportResult(db, 'JUNIOR', 'owner-test-instance', {
+      task_id: claimed.id,
+      revision: claimed.revision,
+      outcome: 'completed',
+      result: {
+        ...implResult,
+        summary: 'created host-smoke.txt',
+        changed_files: ['host-smoke.txt'],
+        working_tree_status: { clean: false, porcelain: '?? host-smoke.txt' },
+      },
+    });
+    writeFileSync(join(repo, 'host-smoke.txt'), 'hello\n');
+    const now = new Date().toISOString();
+    db.insertDispatchRun({
+      id: 'dispatch-host-smoke',
+      task_id: completed.id,
+      worker_role: 'JUNIOR',
+      adapter_id: 'codex-exec-luna',
+      runner_instance_id: 'owner-test-instance',
+      pid: 1,
+      status: 'completed',
+      started_at: now,
+      finished_at: now,
+      exit_code: 0,
+      error_code: null,
+      error_detail: null,
+      created_at: now,
+      updated_at: now,
+    });
+    const awaited = await owner.client.callTool({
+      name: 'await_delegation',
+      arguments: { dispatch_run_id: 'dispatch-host-smoke' },
+    });
+    const text = awaited.content[0] && 'text' in awaited.content[0] ? awaited.content[0].text : '';
+    expect(text).toContain('Final Working Tree Clean: false');
+    expect(text).toContain('Final Working Tree Porcelain:');
+    expect(text).toContain('?? host-smoke.txt');
+    expect(text).not.toContain('\nWorking Tree Clean:');
+  });
+
   it('await_delegation materializes a blocked dispatch in content.text', async () => {
     const { repo, db, owner } = await ownerSession();
     const created = await owner.client.callTool({
@@ -328,6 +379,41 @@ describe('role-filtered tools', () => {
     expect(text).toContain('Outcome: blocked');
     expect(text).toContain('Blocker Reason: OTHER');
     expect(text).toContain('Error Code: WORKER_PROTOCOL_FAILURE');
+  });
+
+  it('await_delegation exposes DISPATCH_STILL_RUNNING when wait times out', async () => {
+    const { repo, db, owner } = await ownerSession();
+    const created = await owner.client.callTool({
+      name: 'create_task',
+      arguments: { type: 'IMPLEMENTATION', payload: implPayload },
+    });
+    const createdTask = structured(created).task as { id: string; revision: number };
+    const git = snapshot(repo);
+    const running = claimTask(db, git, 'JUNIOR', 'owner-test-instance', createdTask.id, createdTask.revision);
+    const now = new Date().toISOString();
+    db.insertDispatchRun({
+      id: 'dispatch-running',
+      task_id: running.id,
+      worker_role: 'JUNIOR',
+      adapter_id: 'codex-exec-luna',
+      runner_instance_id: 'owner-test-instance',
+      pid: 1,
+      status: 'running',
+      started_at: now,
+      finished_at: null,
+      exit_code: null,
+      error_code: null,
+      error_detail: null,
+      created_at: now,
+      updated_at: now,
+    });
+    const awaited = await owner.client.callTool({
+      name: 'await_delegation',
+      arguments: { dispatch_run_id: 'dispatch-running', timeout: 50 },
+    });
+    const text = awaited.content[0] && 'text' in awaited.content[0] ? awaited.content[0].text : '';
+    expect(text).toContain('DISPATCH_STILL_RUNNING');
+    expect(text).toContain('Dispatch Run ID: dispatch-running');
   });
 
   it('lets an OWNER explicitly recover a RUNNING task through recover_task', async () => {
