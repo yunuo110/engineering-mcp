@@ -1,8 +1,25 @@
 # Engineering MCP
 
-**Engineering MCP is a safety-first control plane for native coding-agent harnesses.**
 
-It does not replace a model provider, agent loop, Harness, or scheduler. Engineering MCP coordinates a small set of local coding-agent Harnesses through a narrow Engineering Worker Protocol (EWP/1) while keeping lifecycle authority and repository safety inside the control plane.
+Engineering MCP is an AI engineering control plane built on the Model Context Protocol (MCP).
+
+It coordinates trusted coding workers such as Codex-based workers and Generic Harness integrations while keeping repository ownership, task lifecycle, and execution authority under explicit control.
+
+Unlike a model router, Engineering MCP does not decide which model should solve a problem or expose provider credentials to tasks. Instead, it provides the engineering coordination layer:
+
+- repository-bound task management;
+- controlled worker delegation;
+- lifecycle tracking and recovery;
+- worker result validation;
+- execution records;
+- trusted worker profile selection;
+- compatibility with multiple worker harnesses.
+
+The system is designed around a simple principle:
+
+> Workers perform bounded execution. The control plane owns engineering state.
+
+Engineering MCP keeps durable engineering truth in the repository, Git history, tests, and controlled ledger state rather than relying on temporary AI conversation context.
 
 ## Architecture
 
