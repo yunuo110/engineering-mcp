@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { requireClaimBaseline } from '../git.ts';
 import type { DomainErrorCode } from '../errors.ts';
 import type { Store } from '../store.ts';
@@ -8,8 +7,12 @@ import type { DispatchRun, GitSnapshot } from '../types.ts';
 import { CodexExecAdapter } from '../adapters/codex-exec-adapter.ts';
 import type { WorkerAdapter } from './types.ts';
 import { runWorkerRunner } from './worker-runner.ts';
+import { resolveRuntimeEntry } from '../runtime-resolver.ts';
 
-const WORKER_RUNNER_ENTRY = fileURLToPath(new URL('./worker-runner-entry.ts', import.meta.url));
+const WORKER_RUNNER_ENTRY = resolveRuntimeEntry(import.meta.url, {
+  source: './worker-runner-entry.ts',
+  dist: './worker-runner-entry.js',
+});
 
 export type DelegateOptions = {
   adapterId: string;
@@ -129,7 +132,7 @@ export async function delegateTask(
     if (current) {
       store.updateDispatchRun({ ...current, pid: child.pid ?? null, updated_at: new Date().toISOString() });
     }
-    child.on('error', () => {
+    child.on('error', (error) => {
       try {
         const latest = store.getDispatchRun(run.id);
         if (latest) {
@@ -138,6 +141,7 @@ export async function delegateTask(
             status: 'failed',
             finished_at: new Date().toISOString(),
             error_code: 'WORKER_PROCESS_FAILED',
+            error_detail: `Failed to spawn worker runner: ${error.message}`,
             updated_at: new Date().toISOString(),
           });
         }

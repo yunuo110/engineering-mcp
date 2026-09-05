@@ -1,9 +1,30 @@
+# Dependencies
 node_modules/
+
+# Build output and packages
+dist/
+*.tgz
+
+# Local data
 *.sqlite
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
-dist/
+.engineering-mcp/
+ledgers/
+
+# Environment and secrets
 .env
+.env.*
+
+# Logs
 *.log
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+
+# Test artifacts
 .vitest/
+coverage/
+.tmp/

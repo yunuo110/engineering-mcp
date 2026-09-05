@@ -1,0 +1,5 @@
+# Grok CLI native config snippet for ~/.grok/config.toml.
+# Replace the command path only if your installation is not on PATH.
+[mcp_servers.engineering-mcp]
+command = "engineering-mcp"
+args = ["--role", "owner"]

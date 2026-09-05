@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "engineering-mcp": {
+      "command": "engineering-mcp",
+      "args": ["--role", "owner"]
+    }
+  }
+}

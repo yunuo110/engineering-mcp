@@ -1,0 +1,20 @@
+schema: engineering-cli-adapter/1
+id: example-harness
+name: Example Generic Harness
+adapter: generic-cli
+command: my-harness-cli
+arguments:
+  - "--task-id"
+  - "${task_id}"
+working_directory: "${repo_root}"
+prompt:
+  transport: stdin
+  format: engineering-worker/1
+result:
+  source: stdout
+  format: json
+  strategy: last-json-object
+process:
+  shell: false
+  success_exit_codes: [0]
+protocol_mode: native

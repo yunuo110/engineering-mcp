@@ -1,16 +1,20 @@
 {
-  "name": "engineering-mcp",
+  "name": "engineering-mcp-cli",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
-  "description": "Local Engineering MCP V1 coordination ledger",
+  "description": "Safety-first control plane for native coding-agent harnesses",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
-    "start": "node src/index.ts",
+    "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "release-check": "npm run typecheck && npm test && npm pack --dry-run",
+    "pack": "npm pack",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
@@ -22,5 +26,27 @@
     "@types/node": "^24.3.0",
     "typescript": "~5.9.2",
     "vitest": "^4.1.11"
-  }
+  },
+  "license": "Apache-2.0",
+  "bin": {
+    "engineering-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "examples",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "mcp",
+    "coding-agent",
+    "control-plane",
+    "cli",
+    "engineering-mcp"
+  ],
+  "main": "dist/index.js"
 }

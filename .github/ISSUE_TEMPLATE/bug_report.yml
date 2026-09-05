@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a concrete Engineering MCP bug
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Run ...
+        2. Observe ...
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node version, Engineering MCP version
+    validations:
+      required: true
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Secret check
+      options:
+        - label: I did not include API keys, tokens, credentials, or private endpoints.
+          required: true

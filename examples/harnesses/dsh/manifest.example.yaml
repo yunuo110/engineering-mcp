@@ -1,0 +1,28 @@
+# Verified architecture reference only — NOT a turnkey manifest.
+#
+# This placeholder describes the GenericCliAdapter side of the DSH bridge
+# boundary. It intentionally does not invent DSH flags such as --task-id or
+# --prompt-file. A real deployment must replace `dsh-bridge` with a trusted
+# wrapper that:
+#   1. receives the EWP prompt on stdin;
+#   2. translates it to DSH's real positional headless interface;
+#   3. runs: dsh --profile headless "<positional task>";
+#   4. returns a schema-valid EWP terminal result on stdout.
+schema: engineering-cli-adapter/1
+id: dsh-reference-bridge
+name: DSH Reference Bridge (not turnkey)
+adapter: generic-cli
+command: dsh-bridge
+arguments: []
+working_directory: "${repo_root}"
+prompt:
+  transport: stdin
+  format: engineering-worker/1
+result:
+  source: stdout
+  format: json
+  strategy: last-json-object
+process:
+  shell: false
+  success_exit_codes: [0]
+protocol_mode: prompt-wrapper
