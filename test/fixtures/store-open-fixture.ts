@@ -20,12 +20,17 @@ function main(): void {
     db.exec('BEGIN IMMEDIATE');
     // Readiness means the holder has actually acquired the SQLite write lock.
     process.stdout.write('LOCK_ACQUIRED\n');
-    const waitMs = Number(values.holdMs ?? 8000);
-    setTimeout(() => {
-      db.exec('ROLLBACK');
-      db.close();
-      process.exit(0);
-    }, waitMs);
+
+    // Keep the transaction open until the parent explicitly sends RELEASE.
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk: string) => {
+      if (chunk.trim() === 'RELEASE') {
+        db.exec('ROLLBACK');
+        db.close();
+        process.exit(0);
+      }
+    });
+    process.stdin.resume();
     setInterval(() => {}, 1000);
     return;
   }

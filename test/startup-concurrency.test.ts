@@ -53,19 +53,28 @@ function runStoreOpenCapture(dbPath: string, repo: string): Promise<{ code: numb
   });
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
 function spawnStoreOpenHolder(
   dbPath: string,
   repo: string,
-  holdMs = '8000',
-): { child: ReturnType<typeof spawn>; ready: Promise<void>; code: Promise<number | null> } {
+): { child: ReturnType<typeof spawn>; ready: Promise<void>; code: Promise<number | null>; release: () => void } {
   const child = spawn(
     process.execPath,
-    [fixture, '--store', dbPath, '--repo', repo, '--mode', 'hold-lock', '--holdMs', holdMs],
+    [fixture, '--store', dbPath, '--repo', repo, '--mode', 'hold-lock'],
     {
       cwd: fileURLToPath(new URL('..', import.meta.url)),
       shell: false,
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     },
   );
   let stdout = '';
@@ -84,7 +93,12 @@ function spawnStoreOpenHolder(
     child.on('close', (exitCode) => resolve(exitCode));
     child.on('error', () => resolve(null));
   });
-  return { child, ready, code };
+  const release = (): void => {
+    if (child.stdin?.writable && !child.stdin.destroyed) {
+      child.stdin.write('RELEASE\n');
+    }
+  };
+  return { child, ready, code, release };
 }
 
 function createV5Ledger(dbPath: string, repo: string): void {
@@ -234,22 +248,30 @@ describe('concurrent SQLite startup', () => {
     const initial = Store.open(dbPath, { repoRoot: repo });
     initial.close();
 
-    const holder = spawnStoreOpenHolder(dbPath, repo, '8000');
+    const holder = spawnStoreOpenHolder(dbPath, repo);
     try {
       // Do not proceed until the holder has actually acquired the SQLite write
       // lock and emitted LOCK_ACQUIRED.
-      await holder.ready;
+      await withTimeout(holder.ready, 30_000, 'holder did not emit LOCK_ACQUIRED');
       const startTime = Date.now();
-      const code = await runStoreOpen(dbPath, repo, 'open', '0');
+      const code = await withTimeout(
+        runStoreOpen(dbPath, repo, 'open', '0'),
+        30_000,
+        'contender did not exit within the bounded safety timeout',
+      );
       const elapsed = Date.now() - startTime;
       expect(code).toBe(1);
       expect(elapsed).toBeGreaterThanOrEqual(4000);
-      const holderCode = await holder.code;
+
+      // Release the holder only after the contender has failed closed.
+      holder.release();
+      const holderCode = await withTimeout(holder.code, 10_000, 'holder did not exit after RELEASE');
       expect(holderCode).toBe(0);
     } finally {
       if (holder.child.exitCode === null) {
-        holder.child.kill();
-        await holder.code.catch(() => {});
+        holder.release();
+        await withTimeout(holder.code.catch(() => null), 10_000, 'holder did not exit during cleanup');
+        if (holder.child.exitCode === null) holder.child.kill();
       }
     }
   });
