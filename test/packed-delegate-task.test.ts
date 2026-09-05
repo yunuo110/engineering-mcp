@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,7 +39,7 @@ function initGitRepo(): string {
   writeFileSync(join(repo, 'README.md'), 'packed test\n');
   git(repo, ['add', 'README.md']);
   git(repo, ['commit', '-m', 'init']);
-  return repo;
+  return realpathSync(git(repo, ['rev-parse', '--show-toplevel']));
 }
 
 function run(command: string, args: string[], cwd: string, timeoutMs = 180_000, shell = false) {

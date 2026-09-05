@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { resolveRepository } from '../src/repository-resolver.ts';
 import { DomainError } from '../src/errors.ts';
-import { git, initGitRepo, removeDir, tempDir } from './helpers.ts';
+import { canonicalRepoRoot, git, initGitRepo, removeDir, tempDir } from './helpers.ts';
 
 const dirs: string[] = [];
 
@@ -24,10 +24,11 @@ function linkedWorktree(): { primary: string; worktree: string; worktreeSub: str
   const wt = tempDir('eng-mcp-wt-');
   dirs.push(wt);
   git(primary, ['worktree', 'add', wt, '-b', 'wt-branch']);
-  const sub = `${wt}/subdir`;
+  const canonicalWt = canonicalRepoRoot(wt);
+  const sub = `${canonicalWt}/subdir`;
   const { mkdirSync } = require('node:fs') as typeof import('node:fs');
   mkdirSync(sub, { recursive: true });
-  return { primary, worktree: wt, worktreeSub: sub };
+  return { primary, worktree: canonicalWt, worktreeSub: sub };
 }
 
 describe('repository resolver precedence', () => {

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,6 +99,10 @@ export function git(repo: string, args: string[]): string {
   }).trim();
 }
 
+export function canonicalRepoRoot(repo: string): string {
+  return realpathSync(git(repo, ['rev-parse', '--show-toplevel']));
+}
+
 export function initGitRepo(): string {
   const dir = tempDir('eng-mcp-repo-');
   git(dir, ['init']);
@@ -108,7 +112,7 @@ export function initGitRepo(): string {
   writeFileSync(join(dir, 'README.md'), 'test\n');
   git(dir, ['add', 'README.md']);
   git(dir, ['commit', '-m', 'init']);
-  return dir;
+  return canonicalRepoRoot(dir);
 }
 
 export function openTempStore(repoRoot?: string): { store: Store; dir: string } {
@@ -212,6 +216,6 @@ export function cloneRepo(source: string): string {
   git(dir, ['config', 'user.email', 'test@example.com']);
   git(dir, ['config', 'user.name', 'Test']);
   git(dir, ['config', 'commit.gpgsign', 'false']);
-  return dir;
+  return canonicalRepoRoot(dir);
 }
 

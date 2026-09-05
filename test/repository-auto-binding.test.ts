@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { git, initGitRepo, removeDir, tempDir } from './helpers.ts';
+import { canonicalRepoRoot, git, initGitRepo, removeDir, tempDir } from './helpers.ts';
 
 const dirs: string[] = [];
 
@@ -69,12 +69,13 @@ describe('automatic repository binding child startup', () => {
     const wt = tempDir('eng-mcp-wt-child-');
     dirs.push(wt);
     git(primary, ['worktree', 'add', wt, '-b', 'wt-child']);
-    mkdirSync(`${wt}/sub`, { recursive: true });
+    const worktreeRoot = canonicalRepoRoot(wt);
+    mkdirSync(`${worktreeRoot}/sub`, { recursive: true });
 
-    const result = await runFixture({ cwd: `${wt}/sub` });
+    const result = await runFixture({ cwd: `${worktreeRoot}/sub` });
     expect(result.code).toBe(0);
     const data = JSON.parse(result.stdout);
-    expect(data.repoRoot).toBe(wt);
+    expect(data.repoRoot).toBe(worktreeRoot);
     expect(data.repoRoot).not.toBe(primary);
   });
 

@@ -17,7 +17,7 @@ function jsonBlocks(markdown: string): string[] {
 
 describe('EWP public documentation examples', () => {
   it('request and result examples match authoritative runtime schemas', () => {
-    const markdown = readFileSync(docsPath, 'utf8');
+    const markdown = readFileSync(docsPath, 'utf8').replace(/\r\n/g, '\n');
     const blocks = jsonBlocks(markdown);
     expect(blocks.length).toBeGreaterThanOrEqual(2);
 
