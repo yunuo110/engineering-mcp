@@ -15,6 +15,9 @@ jobs:
         node: [24]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # mixed-version tests load real legacy source by historical commit.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
