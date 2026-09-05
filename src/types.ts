@@ -1,6 +1,6 @@
 import { z } from 'zod/v4';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 export const BUSY_TIMEOUT_MS = 5000;
 
 export const ROLES = ['OWNER', 'JUNIOR', 'PRINCIPAL'] as const;
@@ -259,7 +259,9 @@ export type ResumeTaskInput = z.infer<typeof resumeTaskInputSchema>;
 export const recoverTaskInputSchema = taskIdRevisionSchema;
 export type RecoverTaskInput = z.infer<typeof recoverTaskInputSchema>;
 
-export const delegateTaskInputSchema = taskIdRevisionSchema;
+export const delegateTaskInputSchema = taskIdRevisionSchema.extend({
+  worker_profile: z.string().min(1).optional(),
+});
 export type DelegateTaskInput = z.infer<typeof delegateTaskInputSchema>;
 
 export const awaitDelegationInputSchema = z.object({
@@ -267,6 +269,22 @@ export const awaitDelegationInputSchema = z.object({
   timeout: z.number().int().positive().optional(),
 });
 export type AwaitDelegationInput = z.infer<typeof awaitDelegationInputSchema>;
+
+export const listWorkerProfilesInputSchema = z.object({});
+
+export const workerProfileSummarySchema = z.object({
+  id: z.string().min(1),
+  description: z.string().min(1).optional(),
+  adapter: z.string().min(1),
+  default: z.boolean(),
+  profile: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+});
+
+export const listWorkerProfilesSuccessOutputSchema = z.object({
+  ok: z.literal(true),
+  profiles: z.array(workerProfileSummarySchema),
+});
 
 export const domainErrorBodySchema = z.object({
   code: z.string(),
@@ -278,6 +296,11 @@ export const failureOutputSchema = z.object({
   ok: z.literal(false),
   error: domainErrorBodySchema,
 });
+
+export const listWorkerProfilesOutputSchema = z.discriminatedUnion('ok', [
+  listWorkerProfilesSuccessOutputSchema,
+  failureOutputSchema,
+]);
 
 export const dispatchToolOutputSchema = z.discriminatedUnion('ok', [
   z.object({
@@ -350,6 +373,7 @@ export type DispatchRun = {
   task_id: string;
   worker_role: 'JUNIOR';
   adapter_id: string;
+  worker_profile_id: string | null;
   runner_instance_id: string | null;
   pid: number | null;
   status: DispatchStatus;

@@ -58,6 +58,7 @@ CREATE TABLE task_events (
   to_status TEXT NOT NULL,
   revision INTEGER NOT NULL,
   detail_json TEXT,
+  writer_generation INTEGER NOT NULL DEFAULT 1,
   CHECK (actor_role IN ('OWNER','JUNIOR','PRINCIPAL')),
   CHECK (kind IN ('created','claimed','result','blocked','resumed','cancelled','closed'))
 ) STRICT;
@@ -72,6 +73,8 @@ CREATE TABLE dispatch_runs (
   task_id TEXT NOT NULL REFERENCES tasks(id),
   worker_role TEXT NOT NULL,
   adapter_id TEXT NOT NULL,
+  worker_profile_id TEXT,
+  writer_generation INTEGER NOT NULL DEFAULT 1,
   runner_instance_id TEXT,
   pid INTEGER,
   status TEXT NOT NULL,
@@ -134,7 +137,7 @@ BEFORE INSERT ON tasks
 BEGIN
   SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
   WHERE NEW.writer_generation IS NULL
-     OR NEW.writer_generation != 1;
+     OR NEW.writer_generation != 2;
 END;
 
 CREATE TRIGGER trg_tasks_writer_protocol_update
@@ -142,7 +145,31 @@ BEFORE UPDATE ON tasks
 BEGIN
   SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
   WHERE NEW.writer_generation IS NULL
-     OR NEW.writer_generation != OLD.writer_generation + 1;
+     OR NEW.writer_generation != OLD.writer_generation + 2;
+END;
+
+CREATE TRIGGER trg_task_events_writer_protocol_insert
+BEFORE INSERT ON task_events
+BEGIN
+  SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
+  WHERE NEW.writer_generation IS NULL
+     OR NEW.writer_generation != 2;
+END;
+
+CREATE TRIGGER trg_dispatch_runs_writer_protocol_insert
+BEFORE INSERT ON dispatch_runs
+BEGIN
+  SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
+  WHERE NEW.writer_generation IS NULL
+     OR NEW.writer_generation != 2;
+END;
+
+CREATE TRIGGER trg_dispatch_runs_writer_protocol_update
+BEFORE UPDATE ON dispatch_runs
+BEGIN
+  SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
+  WHERE NEW.writer_generation IS NULL
+     OR NEW.writer_generation != OLD.writer_generation + 2;
 END;
 `;
 
@@ -175,6 +202,7 @@ type EventRow = {
   to_status: string;
   revision: number;
   detail_json: string | null;
+  writer_generation: number;
 };
 
 type DispatchRow = {
@@ -182,6 +210,8 @@ type DispatchRow = {
   task_id: string;
   worker_role: string;
   adapter_id: string;
+  worker_profile_id: string | null;
+  writer_generation: number;
   runner_instance_id: string | null;
   pid: number | null;
   status: string;
@@ -269,6 +299,7 @@ function rowToDispatch(row: DispatchRow): DispatchRun {
     task_id: row.task_id,
     worker_role: 'JUNIOR',
     adapter_id: row.adapter_id,
+    worker_profile_id: row.worker_profile_id,
     runner_instance_id: row.runner_instance_id,
     pid: row.pid,
     status: row.status as DispatchRun['status'],
@@ -299,6 +330,9 @@ const REQUIRED_FENCING_TRIGGERS = [
   'trg_tasks_running_immutable_update',
   'trg_tasks_writer_protocol_insert',
   'trg_tasks_writer_protocol_update',
+  'trg_task_events_writer_protocol_insert',
+  'trg_dispatch_runs_writer_protocol_insert',
+  'trg_dispatch_runs_writer_protocol_update',
 ] as const;
 
 function triggerExists(db: DatabaseSync, name: string): boolean {
@@ -354,7 +388,7 @@ function createAllFencingTriggers(db: DatabaseSync): void {
     BEGIN
       SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
       WHERE NEW.writer_generation IS NULL
-         OR NEW.writer_generation != 1;
+         OR NEW.writer_generation != 2;
     END;
 
     CREATE TRIGGER IF NOT EXISTS trg_tasks_writer_protocol_update
@@ -362,7 +396,31 @@ function createAllFencingTriggers(db: DatabaseSync): void {
     BEGIN
       SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
       WHERE NEW.writer_generation IS NULL
-         OR NEW.writer_generation != OLD.writer_generation + 1;
+         OR NEW.writer_generation != OLD.writer_generation + 2;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_task_events_writer_protocol_insert
+    BEFORE INSERT ON task_events
+    BEGIN
+      SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
+      WHERE NEW.writer_generation IS NULL
+         OR NEW.writer_generation != 2;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_dispatch_runs_writer_protocol_insert
+    BEFORE INSERT ON dispatch_runs
+    BEGIN
+      SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
+      WHERE NEW.writer_generation IS NULL
+         OR NEW.writer_generation != 2;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_dispatch_runs_writer_protocol_update
+    BEFORE UPDATE ON dispatch_runs
+    BEGIN
+      SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
+      WHERE NEW.writer_generation IS NULL
+         OR NEW.writer_generation != OLD.writer_generation + 2;
     END;
   `);
 }
@@ -454,7 +512,7 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
         requireRepositoryBinding(db, repoRoot);
       }
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-    } else if (userVersion === 1 || userVersion === 2 || userVersion === 3 || userVersion === 4 || userVersion === 5) {
+    } else if (userVersion === 1 || userVersion === 2 || userVersion === 3 || userVersion === 4 || userVersion === 5 || userVersion === 6) {
       if (userVersion === 1) {
         const running = db
           .prepare(`SELECT COUNT(*) AS count FROM tasks WHERE status = 'RUNNING'`)
@@ -486,6 +544,8 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
             task_id TEXT NOT NULL REFERENCES tasks(id),
             worker_role TEXT NOT NULL,
             adapter_id TEXT NOT NULL,
+            worker_profile_id TEXT,
+            writer_generation INTEGER NOT NULL DEFAULT 1,
             runner_instance_id TEXT,
             pid INTEGER,
             status TEXT NOT NULL,
@@ -503,6 +563,15 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
           ON dispatch_runs(task_id)
           WHERE status IN ('launching','running');
         `);
+      }
+      if (!columnExists(db, 'dispatch_runs', 'worker_profile_id')) {
+        db.exec('ALTER TABLE dispatch_runs ADD COLUMN worker_profile_id TEXT');
+      }
+      if (!columnExists(db, 'dispatch_runs', 'writer_generation')) {
+        db.exec('ALTER TABLE dispatch_runs ADD COLUMN writer_generation INTEGER NOT NULL DEFAULT 1');
+      }
+      if (!columnExists(db, 'task_events', 'writer_generation')) {
+        db.exec('ALTER TABLE task_events ADD COLUMN writer_generation INTEGER NOT NULL DEFAULT 1');
       }
 
       const metadata = db
@@ -532,6 +601,13 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
       validateExecutionInvariantRows(db);
       validateTaskRepositoryRoots(db);
       validateWriterGenerationRows(db);
+      // Replace pre-V7 writer triggers so a pre-opened V6 writer cannot keep
+      // using the +1 mutation protocol after migration to V7.
+      db.exec('DROP TRIGGER IF EXISTS trg_tasks_writer_protocol_insert');
+      db.exec('DROP TRIGGER IF EXISTS trg_tasks_writer_protocol_update');
+      db.exec('DROP TRIGGER IF EXISTS trg_task_events_writer_protocol_insert');
+      db.exec('DROP TRIGGER IF EXISTS trg_dispatch_runs_writer_protocol_insert');
+      db.exec('DROP TRIGGER IF EXISTS trg_dispatch_runs_writer_protocol_update');
       createAllFencingTriggers(db);
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     } else if (userVersion === SCHEMA_VERSION) {
@@ -827,8 +903,8 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO task_events (
-          task_id, at, actor_role, kind, from_status, to_status, revision, detail_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          task_id, at, actor_role, kind, from_status, to_status, revision, detail_json, writer_generation
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 2)`,
       )
       .run(
         event.task_id,
@@ -853,15 +929,16 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO dispatch_runs (
-          id, task_id, worker_role, adapter_id, runner_instance_id, pid, status,
+          id, task_id, worker_role, adapter_id, worker_profile_id, writer_generation, runner_instance_id, pid, status,
           started_at, finished_at, exit_code, error_code, error_detail, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, 2, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.id,
         run.task_id,
         run.worker_role,
         run.adapter_id,
+        run.worker_profile_id,
         run.runner_instance_id,
         run.pid,
         run.status,
@@ -879,14 +956,16 @@ export class Store {
     this.db
       .prepare(
         `UPDATE dispatch_runs SET
-          worker_role = ?, adapter_id = ?, runner_instance_id = ?, pid = ?, status = ?,
+          worker_role = ?, adapter_id = ?, worker_profile_id = ?, runner_instance_id = ?, pid = ?, status = ?,
           started_at = ?, finished_at = ?, exit_code = ?, error_code = ?, error_detail = ?,
+          writer_generation = writer_generation + 2,
           updated_at = ?
          WHERE id = ?`,
       )
       .run(
         run.worker_role,
         run.adapter_id,
+        run.worker_profile_id,
         run.runner_instance_id,
         run.pid,
         run.status,
@@ -905,7 +984,8 @@ export class Store {
     this.db
       .prepare(
         `UPDATE dispatch_runs
-         SET status = 'failed', finished_at = ?, error_code = ?, error_detail = ?, updated_at = ?
+         SET status = 'failed', finished_at = ?, error_code = ?, error_detail = ?,
+             writer_generation = writer_generation + 2, updated_at = ?
          WHERE task_id = ? AND status IN ('launching','running')`,
       )
       .run(timestamp, errorCode, errorDetail, timestamp, taskId);

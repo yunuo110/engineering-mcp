@@ -64,6 +64,22 @@ This command prints the snippets above and does **not** write configuration file
 
 If you choose to write config manually, preserve unrelated sections and keep existing files backed up outside the repository.
 
+## Worker Profiles (optional)
+
+Worker Profiles are trusted operator configuration. They are loaded once at process startup and are immutable for the process lifetime.
+
+```bash
+engineering-mcp --role owner --worker-profiles /absolute/path/to/profiles.yaml
+```
+
+or:
+
+```bash
+ENGINEERING_MCP_WORKER_PROFILES=/absolute/path/to/profiles.yaml engineering-mcp --role owner
+```
+
+If both are set, `--worker-profiles` wins. Without a profile file, Engineering MCP uses the built-in `codex-luna` default. See [Worker Profiles](worker-profiles.md).
+
 ## Doctor
 
 ```bash

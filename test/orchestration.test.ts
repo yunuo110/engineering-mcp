@@ -207,6 +207,7 @@ describe('V1.6 orchestration', () => {
       task_id: task.id,
       worker_role: 'JUNIOR',
       adapter_id: 'fake-luna',
+      worker_profile_id: null,
       runner_instance_id: 'existing-runner',
       pid: 123,
       status: 'running',

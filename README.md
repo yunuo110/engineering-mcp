@@ -46,6 +46,7 @@ npm install -g engineering-mcp-cli
 engineering-mcp --help
 engineering-mcp setup
 engineering-mcp doctor
+engineering-mcp profiles --worker-profiles /absolute/path/to/profiles.yaml
 ```
 
 From inside a Git repository, start an OWNER server:
@@ -129,6 +130,7 @@ Core OWNER tools include:
 - `create_task`
 - `get_task`
 - `list_active_tasks`
+- `list_worker_profiles`
 - `delegate_task`
 - `await_delegation`
 - `recover_task`
@@ -139,6 +141,29 @@ Core OWNER tools include:
 ## Worker Harnesses
 
 Workers claim tasks through the trusted Worker Runner. Harnesses never own Engineering MCP lifecycle state. A Harness may be a native adapter (for example Codex CLI) or a declarative Generic CLI adapter.
+
+## Worker Profiles
+
+Worker Profiles are trusted operator configuration that select a preconfigured Harness execution profile. They are loaded once at process startup and are immutable for the process lifetime.
+
+```text
+OWNER
+→ delegate_task(worker_profile = "my-generic-worker")
+→ trusted Worker Profile registry
+→ adapter + manifest + opaque Harness config
+→ Worker Runner
+→ native Harness
+```
+
+Use:
+
+```bash
+engineering-mcp --role owner --worker-profiles /absolute/path/to/profiles.yaml
+```
+
+OWNER can list trusted profiles with `list_worker_profiles`, and can select one with `delegate_task(worker_profile = "...")`.
+
+Without a profile file, the built-in `codex-luna` default preserves existing behavior. Worker Profiles do **not** allow task text to choose arbitrary models, providers, executables, or credentials. See [Worker Profiles](docs/worker-profiles.md).
 
 ## GenericCliAdapter
 
@@ -202,6 +227,7 @@ See:
 - [Engineering Worker Protocol](docs/engineering-worker-protocol.md)
 - [Adapter Authoring](docs/adapter-authoring.md)
 - [Host Setup](docs/host-setup.md)
+- [Worker Profiles](docs/worker-profiles.md)
 - [Threat Model](docs/threat-model.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - [SECURITY.md](SECURITY.md)

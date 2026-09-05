@@ -12,7 +12,7 @@ const task: TaskContract = {
   owner_role: 'OWNER',
   assignee_role: null,
   execution_instance_id: null,
-  writer_generation: 1,
+  writer_generation: 2,
   repo_root: 'C:\repo',
   base_commit: 'abc123',
   branch: 'main',

@@ -26,7 +26,7 @@ function sampleTask(overrides: Partial<TaskContract> = {}): TaskContract {
     owner_role: 'OWNER',
     assignee_role: null,
     execution_instance_id: null,
-    writer_generation: 1,
+    writer_generation: 2,
     repo_root: 'C:\\repo',
     base_commit: 'aaa',
     branch: 'master',
@@ -77,6 +77,91 @@ describe('Store', () => {
     expect(loaded?.status).toBe('READY');
     expect(loaded?.payload).toEqual(implPayload);
     expect(opened.store.listEvents(task.id)).toHaveLength(1);
+  });
+
+  it('rolls back a dispatch mutation when a later task mutation fails writer fencing', () => {
+    const opened = openTempStore('C:\\repo');
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    const task = sampleTask({ id: 'rollback-task' });
+    opened.store.insertTask(task);
+    const now = new Date().toISOString();
+    const run = {
+      id: 'dispatch-rollback',
+      task_id: task.id,
+      worker_role: 'JUNIOR' as const,
+      adapter_id: 'codex-exec-luna',
+      worker_profile_id: null,
+      runner_instance_id: null,
+      pid: null,
+      status: 'launching' as const,
+      started_at: null,
+      finished_at: null,
+      exit_code: null,
+      error_code: null,
+      error_detail: null,
+      created_at: now,
+      updated_at: now,
+    };
+    expect(() =>
+      opened.store.transact(() => {
+        opened.store.insertDispatchRun(run);
+        opened.store.updateTask({
+          ...task,
+          writer_generation: 999,
+          revision: 2,
+        });
+      }),
+    ).toThrow();
+    expect(opened.store.getDispatchRun(run.id)).toBeUndefined();
+    expect(opened.store.getTask(task.id)?.status).toBe('READY');
+  });
+
+  it('current V7 dispatch and event mutations advance internal writer_generation', () => {
+    const opened = openTempStore('C:\\repo');
+    stores.push(opened.store);
+    dirs.push(opened.dir);
+    const task = sampleTask({ id: 'generation-task' });
+    opened.store.insertTask(task);
+    opened.store.insertEvent({
+      task_id: task.id,
+      at: task.created_at,
+      actor_role: 'OWNER',
+      kind: 'created',
+      from_status: null,
+      to_status: 'READY',
+      revision: 1,
+    });
+
+    const now = new Date().toISOString();
+    const run = {
+      id: 'generation-dispatch',
+      task_id: task.id,
+      worker_role: 'JUNIOR' as const,
+      adapter_id: 'codex-exec-luna',
+      worker_profile_id: null,
+      runner_instance_id: null,
+      pid: null,
+      status: 'launching' as const,
+      started_at: null,
+      finished_at: null,
+      exit_code: null,
+      error_code: null,
+      error_detail: null,
+      created_at: now,
+      updated_at: now,
+    };
+    opened.store.insertDispatchRun(run);
+    opened.store.updateDispatchRun({ ...run, status: 'running', pid: 42 });
+    opened.store.failActiveDispatchForTask(task.id, 'TEST_FAIL', 'forced');
+    opened.store.close();
+
+    const raw = new DatabaseSync(opened.store.path);
+    const dispatch = raw.prepare(`SELECT writer_generation FROM dispatch_runs WHERE id = ?`).get(run.id) as { writer_generation: number };
+    const event = raw.prepare(`SELECT writer_generation FROM task_events WHERE task_id = ?`).get(task.id) as { writer_generation: number };
+    raw.close();
+    expect(dispatch.writer_generation).toBe(6);
+    expect(event.writer_generation).toBe(2);
   });
 
   it('rolls back a failed transaction atomically', () => {
@@ -207,6 +292,135 @@ describe('Store', () => {
     expect(version).toBe(SCHEMA_VERSION);
   });
 
+  it('migrates a V6 database by adding worker_profile_id to dispatch_runs', () => {
+    const dir = tempDir('eng-mcp-store-v6-');
+    dirs.push(dir);
+    const path = join(dir, 'v6-ledger.sqlite');
+    const raw = new DatabaseSync(path);
+    raw.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        owner_role TEXT NOT NULL,
+        assignee_role TEXT,
+        execution_instance_id TEXT,
+        writer_generation INTEGER,
+        repo_root TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        result_json TEXT,
+        blocker_json TEXT,
+        revision INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX one_running_task ON tasks(status) WHERE status = 'RUNNING';
+      CREATE TABLE task_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        at TEXT NOT NULL,
+        actor_role TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        from_status TEXT,
+        to_status TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        detail_json TEXT
+      ) STRICT;
+      CREATE TABLE ledger_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE dispatch_runs (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        worker_role TEXT NOT NULL,
+        adapter_id TEXT NOT NULL,
+        runner_instance_id TEXT,
+        pid INTEGER,
+        status TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        exit_code INTEGER,
+        error_code TEXT,
+        error_detail TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (worker_role IN ('JUNIOR')),
+        CHECK (status IN ('launching','running','completed','blocked','failed'))
+      ) STRICT;
+      CREATE UNIQUE INDEX one_active_dispatch_per_task
+      ON dispatch_runs(task_id)
+      WHERE status IN ('launching','running');
+    `);
+    raw.prepare(`INSERT INTO ledger_metadata (key, value) VALUES ('repository_root', ?)`).run('repo-a');
+    raw.prepare(`
+      INSERT INTO tasks (
+        id, type, status, owner_role, assignee_role, execution_instance_id,
+        writer_generation, repo_root, base_commit, branch, payload_json, result_json,
+        blocker_json, revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'v6-task',
+      'IMPLEMENTATION',
+      'READY',
+      'OWNER',
+      null,
+      null,
+      1,
+      'repo-a',
+      'aaa',
+      'main',
+      JSON.stringify(implPayload),
+      null,
+      null,
+      1,
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-01T00:00:00.000Z',
+    );
+    const now = '2026-01-01T00:00:00.000Z';
+    raw.prepare(`
+      INSERT INTO dispatch_runs (
+        id, task_id, worker_role, adapter_id, runner_instance_id, pid, status,
+        started_at, finished_at, exit_code, error_code, error_detail, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'v6-dispatch',
+      'v6-task',
+      'JUNIOR',
+      'codex-exec-luna',
+      null,
+      null,
+      'launching',
+      null,
+      null,
+      null,
+      null,
+      null,
+      now,
+      now,
+    );
+    raw.exec(`PRAGMA user_version = 6`);
+    raw.close();
+
+    const migrated = Store.open(path, { repoRoot: 'repo-a' });
+    stores.push(migrated);
+    expect(migrated.getTask('v6-task')?.repo_root).toBe('repo-a');
+    expect(migrated.getDispatchRun('v6-dispatch')?.worker_profile_id).toBeNull();
+    migrated.close();
+
+    const raw2 = new DatabaseSync(path);
+    const dispatchColumns = raw2.prepare(`PRAGMA table_info(dispatch_runs)`).all() as Array<{ name: string }>;
+    const eventColumns = raw2.prepare(`PRAGMA table_info(task_events)`).all() as Array<{ name: string }>;
+    const version = Object.values(raw2.prepare('PRAGMA user_version').get() as Record<string, number>)[0];
+    raw2.close();
+    expect(dispatchColumns.some((column) => column.name === 'worker_profile_id')).toBe(true);
+    expect(dispatchColumns.some((column) => column.name === 'writer_generation')).toBe(true);
+    expect(eventColumns.some((column) => column.name === 'writer_generation')).toBe(true);
+    expect(version).toBe(SCHEMA_VERSION);
+  });
+
   it('binds a ledger to one repository and rejects a different repository', () => {
     const opened = openTempStore('repo-a');
     dirs.push(opened.dir);
@@ -330,7 +544,7 @@ describe('Store', () => {
         ...task,
         status: 'COMPLETED',
         execution_instance_id: 'current-owner',
-        writer_generation: task.writer_generation + 1,
+        writer_generation: task.writer_generation + 2,
         revision: 2,
       }),
     ).toThrow(/EXECUTION_STATE_INVARIANT_VIOLATION/);
@@ -350,7 +564,7 @@ describe('Store', () => {
       status: 'RUNNING' as const,
       assignee_role: 'JUNIOR' as const,
       execution_instance_id: 'current-owner',
-      writer_generation: ready.writer_generation + 1,
+      writer_generation: ready.writer_generation + 2,
       revision: 2,
     };
     opened.store.updateTask(running);
@@ -361,7 +575,7 @@ describe('Store', () => {
       ...running,
       status: 'COMPLETED' as const,
       execution_instance_id: null,
-      writer_generation: running.writer_generation + 1,
+      writer_generation: running.writer_generation + 2,
       result: null,
       revision: 3,
     };
@@ -459,7 +673,7 @@ describe('Store', () => {
       opened.store.updateTask({
         ...task,
         repo_root: 'repo-b',
-        writer_generation: task.writer_generation + 1,
+        writer_generation: task.writer_generation + 2,
         revision: 2,
       }),
     ).toThrow(/REPOSITORY_BINDING_MISMATCH/);
@@ -485,7 +699,7 @@ describe('Store', () => {
         ...task,
         assignee_role: 'PRINCIPAL',
         base_commit: 'changed',
-        writer_generation: task.writer_generation + 1,
+        writer_generation: task.writer_generation + 2,
         revision: 3,
       }),
     ).toThrow(/EXECUTION_STATE_INVARIANT_VIOLATION/);

@@ -1,20 +1,10 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AdapterContext, WorkerAdapter, WorkerResult } from '../orchestration/types.ts';
 import { buildWorkerRequest, ewpResultSchema, ewpResultToWorkerResult, EWP_PROTOCOL } from './ewp.ts';
 import { expandTrustedVariables, type CliAdapterManifest } from './manifest.ts';
-
-function runtimeDir(dispatchRunId: string): string {
-  const base =
-    process.platform === 'win32'
-      ? process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local')
-      : process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share');
-  const dir = join(base, 'engineering-mcp', 'runs', dispatchRunId);
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
+import { dispatchRunDir } from '../dispatch-run-dir.ts';
 
 function findLastJsonObject(stdout: string): unknown | undefined {
   const lines = stdout.split(/\r?\n/);
@@ -127,7 +117,7 @@ export class GenericCliAdapter implements WorkerAdapter {
   async probe(): Promise<void> {}
 
   async execute(context: AdapterContext): Promise<WorkerResult> {
-    const runDir = runtimeDir(context.dispatchRunId);
+    const runDir = dispatchRunDir(context.dispatchRunId);
     const request = buildWorkerRequest(
       context.task,
       context.repositoryRoot,

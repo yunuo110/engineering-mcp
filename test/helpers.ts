@@ -11,6 +11,7 @@ import { DomainError, type DomainErrorCode } from '../src/errors.ts';
 import { inspectRepo } from '../src/git.ts';
 import { createEngineeringServer } from '../src/server.ts';
 import { Store } from '../src/store.ts';
+import { builtinWorkerProfiles } from '../src/worker-profiles.ts';
 import type { GitSnapshot, ImplementationPayload, DiagnosisPayload, ProcessRole } from '../src/types.ts';
 import { expect } from 'vitest';
 
@@ -148,8 +149,15 @@ export async function connectInProcess(
   repoPath: string,
   store: Store,
   executionInstanceId: string = randomUUID(),
+  workerProfiles = builtinWorkerProfiles(),
 ): Promise<Connected> {
-  const server = createEngineeringServer({ processRole, repoPath, store, executionInstanceId });
+  const server = createEngineeringServer({
+    processRole,
+    repoPath,
+    store,
+    executionInstanceId,
+    workerProfiles,
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test-client', version: '0.0.0' });
   await server.connect(serverTransport);

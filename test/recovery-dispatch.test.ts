@@ -65,6 +65,7 @@ function orphanDispatch(taskId: string, id: string, store: Store): void {
     task_id: taskId,
     worker_role: 'JUNIOR',
     adapter_id: 'orphan-adapter',
+    worker_profile_id: null,
     runner_instance_id: 'dead-runner',
     pid: 999,
     status: 'running',

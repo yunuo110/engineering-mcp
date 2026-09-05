@@ -9,6 +9,7 @@ import { resolveRepository } from './repository-resolver.ts';
 import { loadManifest, validateManifest } from './adapters/manifest.ts';
 import { SCHEMA_VERSION } from './types.ts';
 import { resolveRuntimeEntry } from './runtime-resolver.ts';
+import { builtinWorkerProfiles, listWorkerProfiles, loadWorkerProfiles } from './worker-profiles.ts';
 
 const VERSION = '0.1.0';
 const serverEntry = resolveRuntimeEntry(import.meta.url, {
@@ -22,15 +23,17 @@ function printHelp(): void {
 A safety-first control plane for native coding-agent harnesses.
 
 Usage:
-  engineering-mcp --role owner|junior|principal [--repo <path>] [--db <path>]
+  engineering-mcp --role owner|junior|principal [--repo <path>] [--db <path>] [--worker-profiles <path>]
   engineering-mcp setup
   engineering-mcp doctor
+  engineering-mcp profiles
   engineering-mcp adapter validate <manifest>
   engineering-mcp adapter probe <manifest>
 
 Commands:
   setup                 Preview MCP host configuration snippets (no files written)
   doctor                Report local runtime, Git, ledger, and harness availability
+  profiles              Print loaded worker profiles without invoking models
   adapter validate      Validate a GenericCliAdapter manifest only
   adapter probe         Locate the manifest command without invoking a model
 
@@ -127,6 +130,13 @@ directory for automatic Git repository discovery. You can also pin explicitly:
 
   engineering-mcp --role owner --repo /absolute/path/to/repo
 
+Optional trusted Worker Profiles file:
+  engineering-mcp --role owner --worker-profiles /absolute/path/to/profiles.yaml
+
+Worker Profiles are trusted operator configuration. They select preconfigured
+Harness execution profiles; they do not let task text choose executables,
+models, providers, or credentials.
+
 Run "engineering-mcp doctor" to verify local prerequisites.
 `);
 }
@@ -207,6 +217,30 @@ async function doctor(args: string[]): Promise<void> {
     dsh: dshFound ? 'found' : 'not-found',
   };
 
+  const profilePath = optionValue(args, '--worker-profiles') ?? process.env.ENGINEERING_MCP_WORKER_PROFILES;
+  if (profilePath) {
+    try {
+      const workerProfiles = loadWorkerProfiles(profilePath);
+      report.worker_profiles = {
+        status: 'loaded',
+        source_path: workerProfiles.sourcePath,
+        default_profile: workerProfiles.defaultProfile,
+        count: workerProfiles.profiles.size,
+      };
+    } catch (error) {
+      report.worker_profiles = {
+        status: 'invalid',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  } else {
+    report.worker_profiles = {
+      status: 'builtin',
+      default_profile: 'codex-luna',
+      count: 1,
+    };
+  }
+
   try {
     const resolution = resolveRepository({
       arg: repoArg,
@@ -261,6 +295,22 @@ function runProbeVersion(resolved: string): string | null {
   } catch {
     return null;
   }
+}
+
+function profilesCommand(args: string[]): void {
+  const path = optionValue(args, '--worker-profiles') ?? process.env.ENGINEERING_MCP_WORKER_PROFILES;
+  const workerProfiles = path ? loadWorkerProfiles(path) : builtinWorkerProfiles();
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        default_profile: workerProfiles.defaultProfile,
+        profiles: listWorkerProfiles(workerProfiles),
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 function adapterCommand(args: string[]): void {
@@ -343,6 +393,10 @@ async function main(): Promise<void> {
   }
   if (cmd === 'adapter') {
     adapterCommand(rest);
+    return;
+  }
+  if (cmd === 'profiles') {
+    profilesCommand(rest);
     return;
   }
 

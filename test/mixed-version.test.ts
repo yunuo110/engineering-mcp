@@ -20,6 +20,7 @@ import { DomainError } from '../src/errors.ts';
 import type { ProcessRole } from '../src/types.ts';
 
 const LEGACY_COMMIT = '6b38cf4';
+const PREVIOUS_RELEASE_COMMIT = 'c41934e17f76e73b38b3817337119178de3154bc';
 const dirs: string[] = [];
 const legacyDirs: string[] = [];
 const closers: Array<() => Promise<void>> = [];
@@ -106,6 +107,194 @@ rl.on('line', (line) => {
   return dir;
 }
 
+function materializePreviousV6(): string {
+  const dir = mkdtempSync(join(projectRoot, '.legacy-v6-'));
+  legacyDirs.push(dir);
+  const sourceDir = join(dir, 'src');
+  mkdirSync(sourceDir, { recursive: true });
+  for (const file of ['store.ts', 'types.ts', 'errors.ts']) {
+    const content = execFileSync('git', ['show', `${PREVIOUS_RELEASE_COMMIT}:src/${file}`], {
+      encoding: 'utf8',
+    });
+    writeFileSync(join(sourceDir, file), content);
+  }
+  writeFileSync(
+    join(sourceDir, 'legacy-v6-store-helper.ts'),
+    `import { createInterface } from 'node:readline';
+import { Store } from './store.ts';
+
+const dbPath = process.argv[2];
+const repoArg = process.argv[3];
+let store: Store;
+try {
+  store = repoArg ? Store.open(dbPath, { repoRoot: repoArg }) : Store.open(dbPath);
+  process.stdout.write('READY' + String.fromCharCode(10));
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+}
+
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on('line', (line) => {
+  try {
+    const request = JSON.parse(line) as {
+      action: string;
+      task?: unknown;
+      event?: unknown;
+      run?: unknown;
+      task_id?: string;
+      error_code?: string;
+      error_detail?: string;
+    };
+    if (request.action === 'insert') {
+      store.transact(() => store.insertTask(request.task as never));
+      process.stdout.write(JSON.stringify({ ok: true }) + String.fromCharCode(10));
+    } else if (request.action === 'update') {
+      store.updateTask(request.task as never);
+      process.stdout.write(JSON.stringify({ ok: true }) + String.fromCharCode(10));
+    } else if (request.action === 'insertDispatch') {
+      store.transact(() => store.insertDispatchRun(request.run as never));
+      process.stdout.write(JSON.stringify({ ok: true }) + String.fromCharCode(10));
+    } else if (request.action === 'updateDispatch') {
+      store.updateDispatchRun(request.run as never);
+      process.stdout.write(JSON.stringify({ ok: true }) + String.fromCharCode(10));
+    } else if (request.action === 'failActiveDispatch') {
+      store.failActiveDispatchForTask(request.task_id!, request.error_code!, request.error_detail!);
+      process.stdout.write(JSON.stringify({ ok: true }) + String.fromCharCode(10));
+    } else if (request.action === 'insertEvent') {
+      store.transact(() => store.insertEvent(request.event as never));
+      process.stdout.write(JSON.stringify({ ok: true }) + String.fromCharCode(10));
+    } else if (request.action === 'exit') {
+      store.close();
+      process.exit(0);
+    } else {
+      process.stdout.write(JSON.stringify({ ok: false, error: 'unknown action' }) + String.fromCharCode(10));
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stdout.write(JSON.stringify({ ok: false, error: message }) + String.fromCharCode(10));
+  }
+});
+`,
+  );
+  return dir;
+}
+
+function startLegacyV6StoreHelper(legacySrcDir: string, dbPath: string, repoPath?: string): {
+  child: ChildProcess;
+  ready: Promise<void>;
+  run: (request: unknown) => Promise<{ ok: boolean; error?: string }>;
+  close: () => Promise<void>;
+} {
+  const child = spawn(
+    process.execPath,
+    [join(legacySrcDir, 'src', 'legacy-v6-store-helper.ts'), dbPath, ...(repoPath ? [repoPath] : [])],
+    {
+      cwd: projectRoot,
+      env: spawnEnv(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    },
+  );
+  legacyProcs.push(child);
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.setEncoding('utf8');
+  child.stderr?.setEncoding('utf8');
+  child.stdout?.on('data', (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr?.on('data', (chunk: string) => {
+    stderr += chunk;
+  });
+
+  const ready = new Promise<void>((resolve, reject) => {
+    const check = () => {
+      if (stdout.includes('READY')) resolve();
+      if (child.exitCode !== null) reject(new Error(`legacy v6 helper exited early: ${stderr}`));
+    };
+    child.stdout?.on('data', check);
+    child.on('exit', check);
+  });
+
+  const run = (request: unknown) =>
+    new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
+      const onResponse = (chunk: string) => {
+        const line = chunk.split(String.fromCharCode(10)).find((item) => item.startsWith('{'));
+        if (line) {
+          child.stdout?.off('data', onResponse);
+          resolve(JSON.parse(line) as { ok: boolean; error?: string });
+        }
+      };
+      child.stdout?.on('data', onResponse);
+      child.stdin?.write(JSON.stringify(request) + String.fromCharCode(10));
+    });
+
+  const close = async () => {
+    if (child.exitCode !== null) return;
+    child.stdin?.write(JSON.stringify({ action: 'exit' }) + String.fromCharCode(10));
+    await new Promise<void>((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', () => resolve());
+    });
+  };
+
+  return { child, ready, run, close };
+}
+
+function previousV6DispatchRun(id: string, taskId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const timestamp = '2026-01-01T00:00:00.000Z';
+  return {
+    id,
+    task_id: taskId,
+    worker_role: 'JUNIOR',
+    adapter_id: 'codex-exec-luna',
+    runner_instance_id: null,
+    pid: null,
+    status: 'launching',
+    started_at: null,
+    finished_at: null,
+    exit_code: null,
+    error_code: null,
+    error_detail: null,
+    created_at: timestamp,
+    updated_at: timestamp,
+    ...overrides,
+  };
+}
+
+function previousV6Event(taskId: string): Record<string, unknown> {
+  return {
+    task_id: taskId,
+    at: '2026-01-01T00:00:00.000Z',
+    actor_role: 'OWNER',
+    kind: 'created',
+    from_status: null,
+    to_status: 'READY',
+    revision: 1,
+  };
+}
+
+function previousV6Task(id: string, repoRoot: string, status = 'READY'): Record<string, unknown> {
+  return {
+    id,
+    type: 'IMPLEMENTATION',
+    status,
+    owner_role: 'OWNER',
+    assignee_role: null,
+    execution_instance_id: null,
+    writer_generation: 1,
+    repo_root: repoRoot,
+    base_commit: 'aaa',
+    branch: 'main',
+    payload: implPayload,
+    result: null,
+    blocker: null,
+    revision: 1,
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-01T00:00:00.000Z',
+  };
+}
+
 async function connectLegacyStdio(
   processRole: ProcessRole,
   repoPath: string,
@@ -170,7 +359,7 @@ function startLegacyStoreHelper(legacySrcDir: string, dbPath: string): {
     new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
       const onExit = () => {
         try {
-          const line = stdout.split('\n').find((item) => item.startsWith('{'));
+          const line = stdout.split(String.fromCharCode(10)).find((item) => item.startsWith('{'));
           if (!line) {
             reject(new Error(`legacy helper produced no JSON: ${stderr}`));
             return;
@@ -181,7 +370,7 @@ function startLegacyStoreHelper(legacySrcDir: string, dbPath: string): {
         }
       };
       child.once('exit', onExit);
-      child.stdin?.write(`${JSON.stringify(request)}\n`);
+      child.stdin?.write(JSON.stringify(request) + String.fromCharCode(10));
     });
 
   return { child, ready, run };
@@ -262,7 +451,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
         status: 'RUNNING' as const,
         assignee_role: 'JUNIOR' as const,
         execution_instance_id: 'v152-owner',
-        writer_generation: task.writer_generation + 1,
+        writer_generation: task.writer_generation + 2,
         revision: task.revision + 1,
       };
       current.updateTask(next);
@@ -309,7 +498,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
         ...task,
         status: 'COMPLETED' as const,
         execution_instance_id: null,
-        writer_generation: task.writer_generation + 1,
+        writer_generation: task.writer_generation + 2,
         result: implResult,
         revision: task.revision + 1,
       };
@@ -420,7 +609,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
         status: 'RUNNING' as const,
         assignee_role: 'JUNIOR' as const,
         execution_instance_id: 'v153-owner',
-        writer_generation: task.writer_generation + 1,
+        writer_generation: task.writer_generation + 2,
         revision: task.revision + 1,
       };
       current.updateTask(next);
@@ -597,5 +786,154 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
     expect(current.getTask(completed.id)?.status).toBe('COMPLETED');
     expect(current.getTask(blockedTaskFinal.id)?.status).toBe('BLOCKED');
     current.close();
+  });
+});
+
+describe('V1.8-A previous release writer fencing', () => {
+  it('cold previous V6 writer cannot open a V7 ledger', async () => {
+    const repo = initGitRepo();
+    const dbDir = tempDir('eng-mcp-v6-cold-');
+    const dbPath = join(dbDir, 'ledger.sqlite');
+    dirs.push(repo, dbDir);
+
+    const current = Store.open(dbPath, { repoRoot: repo });
+    current.close();
+
+    const legacySrc = materializePreviousV6();
+    const child = spawn(
+      process.execPath,
+      [join(legacySrc, 'src', 'legacy-v6-store-helper.ts'), dbPath, repo],
+      {
+        cwd: projectRoot,
+        env: spawnEnv(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let stderr = '';
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (chunk: string) => { stderr += chunk; });
+    const code = await new Promise<number | null>((resolve) => {
+      child.on('close', resolve);
+      child.on('error', () => resolve(null));
+    });
+    expect(code).not.toBe(0);
+    expect(stderr).toContain('Unsupported schema user_version');
+
+    const verify = Store.open(dbPath, { repoRoot: repo });
+    verify.close();
+  });
+
+  it('pre-opened previous V6 writer cannot INSERT or UPDATE after V7 migration', async () => {
+    const repo = initGitRepo();
+    const dbDir = tempDir('eng-mcp-v6-prewarmed-');
+    const dbPath = join(dbDir, 'ledger.sqlite');
+    dirs.push(repo, dbDir);
+
+    const legacySrc = materializePreviousV6();
+    const helper = startLegacyV6StoreHelper(legacySrc, dbPath, repo);
+    await helper.ready;
+    try {
+      const inserted = await helper.run({ action: 'insert', task: previousV6Task('v6-task-a', repo) });
+      expect(inserted.ok).toBe(true);
+
+      const migrated = Store.open(dbPath, { repoRoot: repo });
+      expect(migrated.getTask('v6-task-a')?.repo_root).toBe(repo);
+      migrated.close();
+
+      const insertAfter = await helper.run({ action: 'insert', task: previousV6Task('v6-task-b', repo) });
+      expect(insertAfter.ok).toBe(false);
+      expect(insertAfter.error).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
+
+      const updateAfter = await helper.run({
+        action: 'update',
+        task: {
+          ...previousV6Task('v6-task-a', repo, 'RUNNING'),
+          assignee_role: 'JUNIOR',
+          execution_instance_id: 'v6-writer',
+          writer_generation: 2,
+          revision: 2,
+        },
+      });
+      expect(updateAfter.ok).toBe(false);
+      expect(updateAfter.error).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
+
+      const verify = Store.open(dbPath, { repoRoot: repo });
+      expect(verify.getTask('v6-task-a')?.status).toBe('READY');
+      expect(verify.getTask('v6-task-a')?.writer_generation).toBe(1);
+      expect(verify.getTask('v6-task-a')?.execution_instance_id).toBeNull();
+      expect(verify.getTask('v6-task-b')).toBeUndefined();
+      verify.close();
+    } finally {
+      await helper.close();
+    }
+  });
+
+  it('pre-opened previous V6 writer cannot mutate dispatch_runs or task_events after V7 migration', async () => {
+    const repo = initGitRepo();
+    const dbDir = tempDir('eng-mcp-v6-dispatch-event-');
+    const dbPath = join(dbDir, 'ledger.sqlite');
+    dirs.push(repo, dbDir);
+
+    const legacySrc = materializePreviousV6();
+    const helper = startLegacyV6StoreHelper(legacySrc, dbPath, repo);
+    await helper.ready;
+    try {
+      const taskInserted = await helper.run({ action: 'insert', task: previousV6Task('v6-dispatch-task', repo) });
+      expect(taskInserted.ok).toBe(true);
+
+      const dispatchInserted = await helper.run({
+        action: 'insertDispatch',
+        run: previousV6DispatchRun('v6-dispatch-existing', 'v6-dispatch-task'),
+      });
+      expect(dispatchInserted.ok).toBe(true);
+
+      const eventInserted = await helper.run({ action: 'insertEvent', event: previousV6Event('v6-dispatch-task') });
+      expect(eventInserted.ok).toBe(true);
+
+      const migrated = Store.open(dbPath, { repoRoot: repo });
+      migrated.close();
+
+      const insertDispatchAfter = await helper.run({
+        action: 'insertDispatch',
+        run: previousV6DispatchRun('v6-dispatch-forged', 'v6-dispatch-task'),
+      });
+      expect(insertDispatchAfter.ok).toBe(false);
+      expect(insertDispatchAfter.error).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
+
+      const updateDispatchAfter = await helper.run({
+        action: 'updateDispatch',
+        run: previousV6DispatchRun('v6-dispatch-existing', 'v6-dispatch-task', {
+          pid: 999,
+          status: 'running',
+          started_at: '2026-01-01T00:00:00.000Z',
+          error_detail: 'forged',
+        }),
+      });
+      expect(updateDispatchAfter.ok).toBe(false);
+      expect(updateDispatchAfter.error).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
+
+      const failActiveAfter = await helper.run({
+        action: 'failActiveDispatch',
+        task_id: 'v6-dispatch-task',
+        error_code: 'FORGED',
+        error_detail: 'forged by v6',
+      });
+      expect(failActiveAfter.ok).toBe(false);
+      expect(failActiveAfter.error).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
+
+      const insertEventAfter = await helper.run({ action: 'insertEvent', event: previousV6Event('v6-dispatch-task') });
+      expect(insertEventAfter.ok).toBe(false);
+      expect(insertEventAfter.error).toContain('CURRENT_PROTOCOL_WRITER_REQUIRED');
+
+      const verify = Store.open(dbPath, { repoRoot: repo });
+      const existing = verify.getDispatchRun('v6-dispatch-existing');
+      expect(existing?.status).toBe('launching');
+      expect(existing?.pid).toBeNull();
+      expect(verify.getDispatchRun('v6-dispatch-forged')).toBeUndefined();
+      expect(verify.listEvents('v6-dispatch-task')).toHaveLength(1);
+      verify.close();
+    } finally {
+      await helper.close();
+    }
   });
 });

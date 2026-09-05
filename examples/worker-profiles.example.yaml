@@ -1,0 +1,20 @@
+# Engineering MCP Worker Profiles example.
+# This is trusted operator configuration. It is loaded once at process startup.
+#
+# Worker Profiles select a preconfigured trusted Harness execution profile.
+# They do NOT let task text choose executables, models, providers, or credentials.
+schema: engineering-worker-profiles/1
+
+default_profile: codex-luna
+
+profiles:
+  codex-luna:
+    adapter: codex-exec-luna
+    description: Codex CLI worker
+
+  my-generic-worker:
+    adapter: generic-cli
+    manifest: /absolute/path/to/trusted/generic-worker.yaml
+    profile: production
+    model: worker-model
+    description: My trusted Generic Harness

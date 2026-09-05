@@ -86,6 +86,12 @@ engineering-mcp adapter probe manifest.yaml
 - `probe` validates the manifest, resolves the command, and runs the equivalent of `<command> --version` with a bounded timeout and local execution only. It does not run an authenticated smoke.
 - `adapter smoke`, if exposed, is explicitly opt-in and may consume model quota.
 
+## Worker Profiles and manifests
+
+Worker Profiles are trusted operator configuration that select an adapter and, for `generic-cli`, a manifest path. The manifest continues to own process launch and EWP transport concerns. Profile `profile` and `model` strings are passed through to `GenericCliAdapter` as opaque trusted Harness configuration.
+
+See [Worker Profiles](worker-profiles.md).
+
 ## Registry
 
 Adapters are registered in `src/adapters/registry.ts`. Specialized adapters (for example Codex) are registered under their stable IDs. Generic CLI manifests are selected at runtime via `generic-cli`.

@@ -25,6 +25,7 @@ The `src/cli.ts` executable provides:
 - `engineering-mcp --role owner|junior|principal`
 - `engineering-mcp setup`
 - `engineering-mcp doctor`
+- `engineering-mcp profiles`
 - `engineering-mcp adapter validate <manifest>`
 - `engineering-mcp adapter probe <manifest>`
 
@@ -77,9 +78,21 @@ Two adapter categories exist:
 
 Adapters are registered in `src/adapters/registry.ts`.
 
+### Worker Profiles
+
+Worker Profiles are trusted operator configuration loaded once at MCP process startup. The OWNER selects a profile by ID through `delegate_task(worker_profile = "...")` or lists them through `list_worker_profiles`.
+
+The registry maps a profile ID to:
+
+- adapter;
+- manifest (for GenericCliAdapter);
+- opaque Harness `profile` and `model` strings.
+
+Worker Profiles are immutable after startup. They do **not** allow task text to choose arbitrary executables, manifest paths, providers, models, or credentials. Without a profile file, Engineering MCP uses the built-in `codex-luna` profile.
+
 ### Engineering Worker Protocol
 
-`engineering-worker/1` is the canonical request/result contract between Engineering MCP and a Worker Harness. Requests contain task and repository context only. Results are terminal and must not contain request-envelope fields.
+`engineering-worker/1` is the canonical request/result contract between Engineering MCP and a Worker Harness. Requests contain task and repository context only. Results are terminal and must not contain request-envelope fields. Worker Profile selection is outside EWP.
 
 ## Safety boundaries
 

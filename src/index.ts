@@ -9,6 +9,7 @@ import { inspectRepo } from './git.ts';
 import { resolveRepository, type RepositoryResolution } from './repository-resolver.ts';
 import { createEngineeringServer } from './server.ts';
 import { Store } from './store.ts';
+import { builtinWorkerProfiles, loadWorkerProfiles } from './worker-profiles.ts';
 import { PROCESS_ROLES, type ProcessRole } from './types.ts';
 
 function parseProcessRole(value: string | undefined): ProcessRole {
@@ -22,13 +23,14 @@ function parseProcessRole(value: string | undefined): ProcessRole {
 }
 
 function main(): void {
-  let values: { role?: string; repo?: string; db?: string };
+  let values: { role?: string; repo?: string; db?: string; 'worker-profiles'?: string };
   try {
     const parsed = parseArgs({
       options: {
         role: { type: 'string' },
         repo: { type: 'string' },
         db: { type: 'string' },
+        'worker-profiles': { type: 'string' },
       },
       strict: true,
       allowPositionals: false,
@@ -55,6 +57,9 @@ function main(): void {
   const executionInstanceId = randomUUID();
   const store = Store.open(dbPath, { repoRoot: repoPath });
 
+  const workerProfilesPath = values['worker-profiles'] ?? process.env.ENGINEERING_MCP_WORKER_PROFILES;
+  const workerProfiles = workerProfilesPath ? loadWorkerProfiles(workerProfilesPath) : builtinWorkerProfiles();
+
   const closeStore = (): void => {
     store.close();
   };
@@ -68,6 +73,7 @@ function main(): void {
         repoPath,
         store,
         executionInstanceId,
+        workerProfiles,
       }),
     {
       onerror: (error) => {

@@ -16,6 +16,7 @@ import {
 } from './lifecycle.ts';
 import { toolsForProcessRole } from './role.ts';
 import { delegateTask, waitForDispatch } from './orchestration/dispatcher.ts';
+import { listWorkerProfiles, resolveWorkerProfile, type WorkerProfiles } from './worker-profiles.ts';
 import type { Store } from './store.ts';
 import {
   awaitDelegationInputSchema,
@@ -29,6 +30,8 @@ import {
   getTaskInputSchema,
   listActiveTasksInputSchema,
   listToolOutputSchema,
+  listWorkerProfilesInputSchema,
+  listWorkerProfilesOutputSchema,
   processRoleToRole,
   recoverTaskInputSchema,
   reportBlockedInputSchema,
@@ -45,6 +48,7 @@ export type ServerConfig = {
   repoPath: string;
   store: Store;
   executionInstanceId: string;
+  workerProfiles: WorkerProfiles;
 };
 
 function taskText(prefix: string, task: TaskContract): string {
@@ -70,6 +74,7 @@ function dispatchText(run: unknown, task: TaskContract, git?: GitSnapshot, still
     id?: string;
     status?: string;
     adapter_id?: string;
+    worker_profile_id?: string | null;
     worker_role?: string;
     exit_code?: number | null;
     error_code?: string | null;
@@ -78,6 +83,7 @@ function dispatchText(run: unknown, task: TaskContract, git?: GitSnapshot, still
   const lines: string[] = [];
   lines.push(`Task ID: ${task.id}`);
   lines.push(`Dispatch Run ID: ${r.id ?? 'unknown'}`);
+  lines.push(`Worker Profile: ${r.worker_profile_id ?? '(default)'}`);
   lines.push(`Adapter: ${r.adapter_id ?? 'unknown'}`);
   lines.push(`Worker Role: ${r.worker_role ?? 'JUNIOR'}`);
   lines.push(`Dispatch Status: ${r.status ?? 'unknown'}`);
@@ -320,15 +326,54 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
       },
       async (args) => {
         try {
+          const profile = resolveWorkerProfile(config.workerProfiles, args.worker_profile);
           const preGit = inspectRepo(config.repoPath);
           const run = await delegateTask(config.store, preGit, args.task_id, args.revision, {
-            adapterId: 'codex-exec-luna',
+            adapterId: profile.adapter,
+            workerProfileId: profile.id,
+            manifestPath: profile.manifestSnapshot ? undefined : profile.manifest,
+            manifestSnapshot: profile.manifestSnapshot,
+            profile: profile.profile,
+            model: profile.model,
           });
           const task = config.store.getTask(args.task_id);
           if (!task) throw new Error('task disappeared during delegation');
           const postGit = inspectRepo(config.repoPath);
           const stillRunning = run.status === 'launching' || run.status === 'running';
           return okDispatch(run, task, postGit, stillRunning);
+        } catch (error) {
+          return fail(error);
+        }
+      },
+    );
+  }
+
+  if (allowed.has('list_worker_profiles')) {
+    server.registerTool(
+      'list_worker_profiles',
+      {
+        title: 'List worker profiles',
+        description: 'List trusted worker execution profiles available to this OWNER process.',
+        inputSchema: listWorkerProfilesInputSchema,
+        outputSchema: listWorkerProfilesOutputSchema,
+      },
+      () => {
+        try {
+          const profiles = listWorkerProfiles(config.workerProfiles);
+          const text = profiles
+            .map((p) =>
+              [
+                p.id,
+                `adapter: ${p.adapter}`,
+                `default: ${p.default}`,
+                ...(p.description ? [`description: ${p.description}`] : []),
+              ].join('\n'),
+            )
+            .join('\n');
+          return {
+            content: [{ type: 'text' as const, text: text || 'No worker profiles' }],
+            structuredContent: { ok: true as const, profiles },
+          };
         } catch (error) {
           return fail(error);
         }

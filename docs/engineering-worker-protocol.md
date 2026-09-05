@@ -93,6 +93,10 @@ The result must **not** include request-envelope fields:
 - `repository`
 - `worker`
 
+## Worker Profile selection is outside EWP
+
+`worker_profile`, `adapter`, `manifest`, `provider`, `model`, and executable selection are OWNER orchestration configuration. They are **not** part of `engineering-worker/1`. EWP remains a Harness-independent Worker task protocol.
+
 ## EWP REQUEST ≠ EWP TERMINAL RESULT
 
 An EWP request is the input given to a Harness. An EWP terminal result is the final outcome returned by the Harness. They are distinct schemas. Request fields are forbidden in a terminal result, and terminal result fields are not part of a request.

@@ -1,22 +1,12 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { workerResultSchema } from '../orchestration/types.ts';
 import type { AdapterContext, WorkerAdapter, WorkerResult } from '../orchestration/types.ts';
 import { resolveCodexLauncher, type CodexLaunch } from './codex-launcher.ts';
+import { dispatchRunDir } from '../dispatch-run-dir.ts';
 
 export const LUNA_MODEL = 'gpt-5.6-luna';
-
-function runtimeDir(dispatchRunId: string): string {
-  const base =
-    process.platform === 'win32'
-      ? process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local')
-      : process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share');
-  const dir = join(base, 'engineering-mcp', 'runs', dispatchRunId);
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
 
 function taskPrompt(context: AdapterContext): string {
   const task = context.task;
@@ -105,7 +95,7 @@ export class CodexExecAdapter implements WorkerAdapter {
   }
 
   async execute(context: AdapterContext): Promise<WorkerResult> {
-    const dir = runtimeDir(context.dispatchRunId);
+    const dir = dispatchRunDir(context.dispatchRunId);
     const outputPath = join(dir, 'last-message.txt');
     try {
       rmSync(outputPath, { force: true });

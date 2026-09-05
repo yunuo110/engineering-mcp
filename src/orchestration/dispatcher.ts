@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { requireClaimBaseline } from '../git.ts';
 import type { DomainErrorCode } from '../errors.ts';
 import type { Store } from '../store.ts';
@@ -8,6 +10,7 @@ import { CodexExecAdapter } from '../adapters/codex-exec-adapter.ts';
 import type { WorkerAdapter } from './types.ts';
 import { runWorkerRunner } from './worker-runner.ts';
 import { resolveRuntimeEntry } from '../runtime-resolver.ts';
+import { dispatchRunDir } from '../dispatch-run-dir.ts';
 
 const WORKER_RUNNER_ENTRY = resolveRuntimeEntry(import.meta.url, {
   source: './worker-runner-entry.ts',
@@ -16,6 +19,7 @@ const WORKER_RUNNER_ENTRY = resolveRuntimeEntry(import.meta.url, {
 
 export type DelegateOptions = {
   adapterId: string;
+  workerProfileId?: string;
   inProcess?: boolean;
   executionInstanceId?: string;
   adapter?: WorkerAdapter;
@@ -24,6 +28,7 @@ export type DelegateOptions = {
   runnerEntry?: string;
   runnerArgs?: string[];
   manifestPath?: string;
+  manifestSnapshot?: string;
   profile?: string;
   model?: string;
 };
@@ -59,6 +64,7 @@ export async function delegateTask(
     task_id: taskId,
     worker_role: 'JUNIOR',
     adapter_id: options.adapterId,
+    worker_profile_id: options.workerProfileId ?? null,
     runner_instance_id: null,
     pid: null,
     status: 'launching',
@@ -101,6 +107,11 @@ export async function delegateTask(
       throw error;
     }
   } else {
+    let runnerManifestPath = options.manifestPath;
+    if (options.manifestSnapshot) {
+      runnerManifestPath = join(dispatchRunDir(run.id), 'manifest.yaml');
+      writeFileSync(runnerManifestPath, options.manifestSnapshot, 'utf8');
+    }
     const child = spawn(
       process.execPath,
       [
@@ -117,7 +128,7 @@ export async function delegateTask(
         run.id,
         '--adapter',
         options.adapterId,
-        ...(options.manifestPath ? ['--manifest', options.manifestPath] : []),
+        ...(runnerManifestPath ? ['--manifest', runnerManifestPath] : []),
         ...(options.profile ? ['--profile', options.profile] : []),
         ...(options.model ? ['--model', options.model] : []),
         ...(options.runnerArgs ?? []),

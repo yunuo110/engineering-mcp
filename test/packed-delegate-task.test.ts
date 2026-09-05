@@ -42,6 +42,77 @@ function initGitRepo(): string {
   return realpathSync(git(repo, ['rev-parse', '--show-toplevel']));
 }
 
+function writePackedProfileFixture(): { profilesFile: string; scriptPath: string } {
+  const dir = tempDir('eng-mcp-packed-profiles-');
+  const scriptPath = join(dir, 'packed-generic-harness.cjs');
+  writeFileSync(
+    scriptPath,
+    `const fs = require('node:fs');
+const path = require('node:path');
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  fs.writeFileSync(path.join(process.cwd(), 'hello.txt'), 'hello from packed profile' + String.fromCharCode(10));
+  process.stdout.write(JSON.stringify({
+    protocol: 'engineering-worker/1',
+    outcome: 'completed',
+    summary: 'packed profile completed',
+    changed_files: ['hello.txt'],
+    validation: [],
+    known_limitations: [],
+    exit_code: 0
+  }));
+});
+`,
+    'utf8',
+  );
+  const manifestPath = join(dir, 'packed-generic.yaml');
+  writeFileSync(
+    manifestPath,
+    `schema: engineering-cli-adapter/1
+id: packed-generic
+name: Packed Generic
+adapter: generic-cli
+command: ${JSON.stringify(process.execPath)}
+arguments:
+  - ${JSON.stringify(scriptPath)}
+working_directory: "\${repo_root}"
+prompt:
+  transport: stdin
+  format: engineering-worker/1
+result:
+  source: stdout
+  format: json
+  strategy: last-json-object
+process:
+  shell: false
+  success_exit_codes: [0]
+protocol_mode: native
+`,
+    'utf8',
+  );
+  const profilesFile = join(dir, 'profiles.yaml');
+  writeFileSync(
+    profilesFile,
+    `schema: engineering-worker-profiles/1
+default_profile: codex-luna
+profiles:
+  codex-luna:
+    adapter: codex-exec-luna
+    description: Codex CLI worker
+  packed-generic:
+    adapter: generic-cli
+    manifest: ${JSON.stringify(manifestPath)}
+    profile: headless
+    model: fake-model
+    description: Packed generic worker
+`,
+    'utf8',
+  );
+  return { profilesFile, scriptPath };
+}
+
 function run(command: string, args: string[], cwd: string, timeoutMs = 180_000, shell = false) {
   const result = spawnSync(command, args, {
     cwd,
@@ -164,6 +235,67 @@ describe('packed public artifact delegation regression', () => {
     } finally {
       await client.close();
       await transport.close();
+    }
+
+    // Packed profile-selection path: load a trusted profile registry at
+    // process startup and delegate through an explicit generic profile.
+    const { profilesFile } = writePackedProfileFixture();
+    const profileTransport = new StdioClientTransport({
+      command: process.execPath,
+      args: [installedCli, '--role', 'owner', '--repo', repo, '--db', dbPath, '--worker-profiles', profilesFile],
+      cwd: repo,
+      env: { ...(process.env as Record<string, string>) },
+      stderr: 'pipe',
+    });
+    const profileClient = new Client({ name: 'packed-profile-test', version: '0.0.0' });
+    await profileClient.connect(profileTransport);
+    try {
+      expect(profileClient.getServerVersion()).toBeTruthy();
+
+      const listed = await profileClient.callTool({ name: 'list_worker_profiles', arguments: {} });
+      expect(listed.isError).toBeFalsy();
+      const listedBody = structured(listed);
+      const listedProfiles = listedBody.profiles as Array<{ id: string; adapter: string }>;
+      expect(listedProfiles.map((p) => p.id)).toContain('packed-generic');
+      expect(listedProfiles.find((p) => p.id === 'packed-generic')?.adapter).toBe('generic-cli');
+
+      const created = await profileClient.callTool({
+        name: 'create_task',
+        arguments: {
+          type: 'IMPLEMENTATION',
+          payload: {
+            goal: 'Create hello.txt from packed generic profile',
+            parent_intent: 'packed profile regression',
+            allowed_scope: ['hello.txt'],
+            forbidden_scope: [],
+            acceptance_criteria: [],
+            validation_requirements: [],
+            context_files: [],
+            knowledge_refs: [],
+            parent_risk: 'L1',
+          },
+        },
+      });
+      const createdBody = structured(created);
+      const profileTask = createdBody.task as { id: string; revision: number; status: string };
+      expect(profileTask.status).toBe('READY');
+
+      const delegated = await profileClient.callTool({
+        name: 'delegate_task',
+        arguments: { task_id: profileTask.id, revision: profileTask.revision, worker_profile: 'packed-generic' },
+      });
+      expect(delegated.isError).toBeFalsy();
+      const delegatedBody = structured(delegated);
+      expect(delegatedBody.ok).toBe(true);
+      const profileRun = delegatedBody.dispatch_run as { status: string; adapter_id: string; worker_profile_id: string };
+      const profileTaskResult = delegatedBody.task as { status: string };
+      expect(profileRun.status).toBe('completed');
+      expect(profileRun.adapter_id).toBe('generic-cli');
+      expect(profileRun.worker_profile_id).toBe('packed-generic');
+      expect(profileTaskResult.status).toBe('COMPLETED');
+    } finally {
+      await profileClient.close();
+      await profileTransport.close();
     }
   }, 300_000);
 });

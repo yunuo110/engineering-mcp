@@ -4,6 +4,7 @@ export const OWNER_TOOLS = [
   'create_task',
   'get_task',
   'list_active_tasks',
+  'list_worker_profiles',
   'delegate_task',
   'await_delegation',
   'recover_task',
