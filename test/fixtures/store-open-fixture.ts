@@ -18,6 +18,8 @@ function main(): void {
   if (values.mode === 'hold-lock') {
     const db = new DatabaseSync(values.store, { timeout: 100 });
     db.exec('BEGIN IMMEDIATE');
+    // Readiness means the holder has actually acquired the SQLite write lock.
+    process.stdout.write('LOCK_ACQUIRED\n');
     const waitMs = Number(values.holdMs ?? 8000);
     setTimeout(() => {
       db.exec('ROLLBACK');

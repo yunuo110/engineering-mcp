@@ -52,6 +52,41 @@ function runStoreOpenCapture(dbPath: string, repo: string): Promise<{ code: numb
     child.on('error', () => resolve({ code: null, stderr }));
   });
 }
+
+function spawnStoreOpenHolder(
+  dbPath: string,
+  repo: string,
+  holdMs = '8000',
+): { child: ReturnType<typeof spawn>; ready: Promise<void>; code: Promise<number | null> } {
+  const child = spawn(
+    process.execPath,
+    [fixture, '--store', dbPath, '--repo', repo, '--mode', 'hold-lock', '--holdMs', holdMs],
+    {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  let stdout = '';
+  child.stdout?.setEncoding('utf8');
+  child.stdout?.on('data', (chunk: string) => {
+    stdout += chunk;
+    if (stdout.includes('LOCK_ACQUIRED')) readyResolve();
+  });
+
+  let readyResolve!: () => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    readyResolve = resolve;
+    child.on('error', reject);
+  });
+  const code = new Promise<number | null>((resolve) => {
+    child.on('close', (exitCode) => resolve(exitCode));
+    child.on('error', () => resolve(null));
+  });
+  return { child, ready, code };
+}
+
 function createV5Ledger(dbPath: string, repo: string): void {
   const raw = new DatabaseSync(dbPath);
   raw.exec(`
@@ -199,15 +234,24 @@ describe('concurrent SQLite startup', () => {
     const initial = Store.open(dbPath, { repoRoot: repo });
     initial.close();
 
-    const holder = runStoreOpen(dbPath, repo, 'hold-lock', '8000');
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    const startTime = Date.now();
-    const code = await runStoreOpen(dbPath, repo, 'open', '0');
-    const elapsed = Date.now() - startTime;
-    expect(code).toBe(1);
-    expect(elapsed).toBeGreaterThanOrEqual(4000);
-    const holderCode = await holder;
-    expect(holderCode).toBe(0);
+    const holder = spawnStoreOpenHolder(dbPath, repo, '8000');
+    try {
+      // Do not proceed until the holder has actually acquired the SQLite write
+      // lock and emitted LOCK_ACQUIRED.
+      await holder.ready;
+      const startTime = Date.now();
+      const code = await runStoreOpen(dbPath, repo, 'open', '0');
+      const elapsed = Date.now() - startTime;
+      expect(code).toBe(1);
+      expect(elapsed).toBeGreaterThanOrEqual(4000);
+      const holderCode = await holder.code;
+      expect(holderCode).toBe(0);
+    } finally {
+      if (holder.child.exitCode === null) {
+        holder.child.kill();
+        await holder.code.catch(() => {});
+      }
+    }
   });
 
   it('creates current schema after fresh concurrent startup', async () => {
