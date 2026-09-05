@@ -431,6 +431,7 @@ export function recoverTask(
         blocker: next.blocker,
       },
     });
+    store.failActiveDispatchForTask(next.id, 'EXPLICIT_OWNER_RECOVERY', 'Active dispatch terminated by explicit OWNER recovery');
     return next;
   });
 }
@@ -526,6 +527,7 @@ export function cancelTask(
       revision: next.revision,
       detail: reason === undefined ? null : { reason },
     });
+    store.failActiveDispatchForTask(next.id, 'OWNER_CANCELLED', 'Active dispatch terminated by OWNER cancellation');
     return next;
   });
 }

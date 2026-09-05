@@ -15,13 +15,17 @@ import {
   reportResult,
 } from './lifecycle.ts';
 import { toolsForProcessRole } from './role.ts';
+import { delegateTask, waitForDispatch } from './orchestration/dispatcher.ts';
 import type { Store } from './store.ts';
 import {
+  awaitDelegationInputSchema,
   cancelTaskInputSchema,
   claimNextTaskInputSchema,
   claimTaskInputSchema,
   closeTaskInputSchema,
   createTaskInputSchema,
+  delegateTaskInputSchema,
+  dispatchToolOutputSchema,
   getTaskInputSchema,
   listActiveTasksInputSchema,
   listToolOutputSchema,
@@ -31,6 +35,7 @@ import {
   reportResultInputSchema,
   resumeTaskInputSchema,
   taskToolOutputSchema,
+  type GitSnapshot,
   type ProcessRole,
   type TaskContract,
 } from './types.ts';
@@ -51,6 +56,75 @@ function okTask(prefix: string, task: TaskContract) {
   return {
     content: [{ type: 'text' as const, text: taskText(prefix, task) }],
     structuredContent: { ok: true as const, task },
+  };
+}
+
+function boundedList(items: string[], limit = 12): string {
+  const bounded = items.slice(0, limit);
+  const suffix = items.length > limit ? `\n[truncated ${items.length - limit} more]` : '';
+  return bounded.join('\n');
+}
+
+function dispatchText(run: unknown, task: TaskContract, git?: GitSnapshot): string {
+  const r = run as {
+    id?: string;
+    status?: string;
+    adapter_id?: string;
+    worker_role?: string;
+    exit_code?: number | null;
+    error_code?: string | null;
+    error_detail?: string | null;
+  };
+  const lines: string[] = [];
+  lines.push(`Task ID: ${task.id}`);
+  lines.push(`Dispatch Run ID: ${r.id ?? 'unknown'}`);
+  lines.push(`Adapter: ${r.adapter_id ?? 'unknown'}`);
+  lines.push(`Worker Role: ${r.worker_role ?? 'JUNIOR'}`);
+  lines.push(`Dispatch Status: ${r.status ?? 'unknown'}`);
+  lines.push(`Task Status: ${task.status}`);
+  lines.push(`Task Revision: ${task.revision}`);
+  if (task.status === 'COMPLETED' && task.result) {
+    const result = task.result as {
+      summary?: string;
+      changed_files?: string[];
+      validation?: Array<{ check?: string; status?: string }>;
+      working_tree_status?: { clean?: boolean; porcelain?: string };
+    };
+    lines.push(`Outcome: completed`);
+    if (result.summary) lines.push(`Summary: ${result.summary}`);
+    if (result.changed_files?.length) lines.push(`Changed Files:\n${boundedList(result.changed_files)}`);
+    const validation = result.validation ?? [];
+    lines.push(`Validation: ${validation.map((v) => `${v.check ?? '?'}=${v.status ?? '?'}`).join(', ') || 'none'}`);
+    lines.push(`Working Tree Clean: ${result.working_tree_status?.clean ?? 'unknown'}`);
+    if (result.working_tree_status?.porcelain) {
+      lines.push(`Working Tree Porcelain:\n${boundedList(result.working_tree_status.porcelain.split('\n'))}`);
+    }
+  }
+  if (task.status === 'BLOCKED' && task.blocker) {
+    lines.push(`Outcome: blocked`);
+    lines.push(`Blocker Reason: ${task.blocker.reason}`);
+    lines.push(`Blocker Summary: ${task.blocker.summary}`);
+  }
+  if (r.error_code || r.error_detail) {
+    lines.push(`Error Code: ${r.error_code ?? 'none'}`);
+    lines.push(`Error Detail: ${r.error_detail ?? 'none'}`);
+  }
+  if (r.exit_code !== null && r.exit_code !== undefined) {
+    lines.push(`Worker Exit Code: ${r.exit_code}`);
+  }
+  lines.push(`HEAD Before: ${task.base_commit}`);
+  if (git) {
+    lines.push(`HEAD After: ${git.head}`);
+    lines.push(`Working Tree Clean: ${git.clean}`);
+    if (git.porcelain) lines.push(`Working Tree Porcelain:\n${boundedList(git.porcelain.split('\n'))}`);
+  }
+  return lines.join('\n');
+}
+
+function okDispatch(run: unknown, task: TaskContract, git?: GitSnapshot) {
+  return {
+    content: [{ type: 'text' as const, text: dispatchText(run, task, git) }],
+    structuredContent: { ok: true as const, dispatch_run: run, task },
   };
 }
 
@@ -228,6 +302,56 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
         try {
           const task = reportBlocked(config.store, actor, config.executionInstanceId, args);
           return okTask('Blocked', task);
+        } catch (error) {
+          return fail(error);
+        }
+      },
+    );
+  }
+
+  if (allowed.has('delegate_task')) {
+    server.registerTool(
+      'delegate_task',
+      {
+        title: 'Delegate task',
+        description:
+          'Delegate a READY implementation task to the trusted JUNIOR Luna worker runner and wait for terminal task state.',
+        inputSchema: delegateTaskInputSchema,
+        outputSchema: dispatchToolOutputSchema,
+      },
+      async (args) => {
+        try {
+          const git = inspectRepo(config.repoPath);
+          const run = await delegateTask(config.store, git, args.task_id, args.revision, {
+            adapterId: 'codex-exec-luna',
+          });
+          const task = config.store.getTask(args.task_id);
+          if (!task) throw new Error('task disappeared during delegation');
+          return okDispatch(run, task, git);
+        } catch (error) {
+          return fail(error);
+        }
+      },
+    );
+  }
+
+  if (allowed.has('await_delegation')) {
+    server.registerTool(
+      'await_delegation',
+      {
+        title: 'Await delegation',
+        description:
+          'Wait for a dispatch run to reach terminal state without terminating the worker runner.',
+        inputSchema: awaitDelegationInputSchema,
+        outputSchema: dispatchToolOutputSchema,
+      },
+      async (args) => {
+        try {
+          const run = await waitForDispatch(config.store, args.dispatch_run_id, args.timeout ?? 120_000);
+          const task = config.store.getTask(run.task_id);
+          if (!task) throw new Error('task disappeared while awaiting delegation');
+          const git = inspectRepo(config.repoPath);
+          return okDispatch(run, task, git);
         } catch (error) {
           return fail(error);
         }

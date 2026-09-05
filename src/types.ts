@@ -1,6 +1,6 @@
 import { z } from 'zod/v4';
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 export const BUSY_TIMEOUT_MS = 5000;
 
 export const ROLES = ['OWNER', 'JUNIOR', 'PRINCIPAL'] as const;
@@ -259,6 +259,35 @@ export type ResumeTaskInput = z.infer<typeof resumeTaskInputSchema>;
 export const recoverTaskInputSchema = taskIdRevisionSchema;
 export type RecoverTaskInput = z.infer<typeof recoverTaskInputSchema>;
 
+export const delegateTaskInputSchema = taskIdRevisionSchema;
+export type DelegateTaskInput = z.infer<typeof delegateTaskInputSchema>;
+
+export const awaitDelegationInputSchema = z.object({
+  dispatch_run_id: z.string().min(1),
+  timeout: z.number().int().positive().optional(),
+});
+export type AwaitDelegationInput = z.infer<typeof awaitDelegationInputSchema>;
+
+export const domainErrorBodySchema = z.object({
+  code: z.string(),
+  message: z.string(),
+  details: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const failureOutputSchema = z.object({
+  ok: z.literal(false),
+  error: domainErrorBodySchema,
+});
+
+export const dispatchToolOutputSchema = z.discriminatedUnion('ok', [
+  z.object({
+    ok: z.literal(true),
+    dispatch_run: z.record(z.string(), z.unknown()),
+    task: taskContractSchema,
+  }),
+  failureOutputSchema,
+]);
+
 export const cancelTaskInputSchema = z.object({
   task_id: z.string().min(1),
   revision: z.number().int().positive(),
@@ -271,16 +300,6 @@ export const closeTaskInputSchema = z.object({
   decision: z.string().min(1).optional(),
 });
 
-export const domainErrorBodySchema = z.object({
-  code: z.string(),
-  message: z.string(),
-  details: z.record(z.string(), z.unknown()).optional(),
-});
-
-export const failureOutputSchema = z.object({
-  ok: z.literal(false),
-  error: domainErrorBodySchema,
-});
 
 export const taskSuccessOutputSchema = z.object({
   ok: z.literal(true),
@@ -320,6 +339,26 @@ export type TaskEvent = {
   to_status: TaskStatus;
   revision: number;
   detail: Record<string, unknown> | null;
+};
+
+export const DISPATCH_STATUSES = ['launching', 'running', 'completed', 'blocked', 'failed'] as const;
+export type DispatchStatus = (typeof DISPATCH_STATUSES)[number];
+
+export type DispatchRun = {
+  id: string;
+  task_id: string;
+  worker_role: 'JUNIOR';
+  adapter_id: string;
+  runner_instance_id: string | null;
+  pid: number | null;
+  status: DispatchStatus;
+  started_at: string | null;
+  finished_at: string | null;
+  exit_code: number | null;
+  error_code: string | null;
+  error_detail: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export function processRoleToRole(processRole: ProcessRole): Role {

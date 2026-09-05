@@ -12,6 +12,7 @@ import {
   taskPayloadSchema,
   taskResultSchema,
   taskStatusSchema,
+  type DispatchRun,
   type EventKind,
   type Role,
   type TaskContract,
@@ -65,6 +66,29 @@ CREATE TABLE ledger_metadata (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 ) STRICT;
+
+CREATE TABLE dispatch_runs (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  worker_role TEXT NOT NULL,
+  adapter_id TEXT NOT NULL,
+  runner_instance_id TEXT,
+  pid INTEGER,
+  status TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT,
+  exit_code INTEGER,
+  error_code TEXT,
+  error_detail TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (worker_role IN ('JUNIOR')),
+  CHECK (status IN ('launching','running','completed','blocked','failed'))
+) STRICT;
+
+CREATE UNIQUE INDEX one_active_dispatch_per_task
+ON dispatch_runs(task_id)
+WHERE status IN ('launching','running');
 
 CREATE TRIGGER trg_tasks_execution_invariant_insert
 BEFORE INSERT ON tasks
@@ -153,6 +177,23 @@ type EventRow = {
   detail_json: string | null;
 };
 
+type DispatchRow = {
+  id: string;
+  task_id: string;
+  worker_role: string;
+  adapter_id: string;
+  runner_instance_id: string | null;
+  pid: number | null;
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  exit_code: number | null;
+  error_code: string | null;
+  error_detail: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type NewTaskEvent = {
   task_id: string;
   at: string;
@@ -222,9 +263,31 @@ function rowToEvent(row: EventRow): TaskEvent {
   };
 }
 
+function rowToDispatch(row: DispatchRow): DispatchRun {
+  return {
+    id: row.id,
+    task_id: row.task_id,
+    worker_role: 'JUNIOR',
+    adapter_id: row.adapter_id,
+    runner_instance_id: row.runner_instance_id,
+    pid: row.pid,
+    status: row.status as DispatchRun['status'],
+    started_at: row.started_at,
+    finished_at: row.finished_at,
+    exit_code: row.exit_code,
+    error_code: row.error_code,
+    error_detail: row.error_detail,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
 function applyConnectionPragmas(db: DatabaseSync): void {
   db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-  db.exec('PRAGMA journal_mode = WAL');
+  const currentJournal = String(pragmaValue(db, 'journal_mode')).toLowerCase();
+  if (currentJournal !== 'wal') {
+    db.exec('PRAGMA journal_mode = WAL');
+  }
   db.exec('PRAGMA foreign_keys = ON');
 }
 
@@ -395,7 +458,7 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
       }
       throw error;
     }
-  } else if (userVersion === 1 || userVersion === 2 || userVersion === 3 || userVersion === 4) {
+  } else if (userVersion === 1 || userVersion === 2 || userVersion === 3 || userVersion === 4 || userVersion === 5) {
     db.exec('BEGIN IMMEDIATE');
     try {
       if (userVersion === 1) {
@@ -420,6 +483,31 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
           ) STRICT;
+        `);
+      }
+      if (!tableExists(db, 'dispatch_runs')) {
+        db.exec(`
+          CREATE TABLE dispatch_runs (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id),
+            worker_role TEXT NOT NULL,
+            adapter_id TEXT NOT NULL,
+            runner_instance_id TEXT,
+            pid INTEGER,
+            status TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            exit_code INTEGER,
+            error_code TEXT,
+            error_detail TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK (worker_role IN ('JUNIOR')),
+            CHECK (status IN ('launching','running','completed','blocked','failed'))
+          ) STRICT;
+          CREATE UNIQUE INDEX one_active_dispatch_per_task
+          ON dispatch_runs(task_id)
+          WHERE status IN ('launching','running');
         `);
       }
 
@@ -514,12 +602,12 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
     (
       db
         .prepare(
-          `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tasks', 'task_events', 'ledger_metadata')`,
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tasks', 'task_events', 'ledger_metadata', 'dispatch_runs')`,
         )
         .all() as Array<{ name: string }>
     ).map((row) => row.name),
   );
-  if (!names.has('tasks') || !names.has('task_events') || !names.has('ledger_metadata')) {
+  if (!names.has('tasks') || !names.has('task_events') || !names.has('ledger_metadata') || !names.has('dispatch_runs')) {
     throw new DomainError('SCHEMA_MISMATCH', 'Required tables are missing');
   }
   validateFencingObjects(db);
@@ -774,5 +862,92 @@ export class Store {
       .prepare(`SELECT * FROM task_events WHERE task_id = ? ORDER BY id ASC`)
       .all(taskId) as EventRow[];
     return rows.map(rowToEvent);
+  }
+
+  insertDispatchRun(run: DispatchRun): void {
+    this.db
+      .prepare(
+        `INSERT INTO dispatch_runs (
+          id, task_id, worker_role, adapter_id, runner_instance_id, pid, status,
+          started_at, finished_at, exit_code, error_code, error_detail, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        run.id,
+        run.task_id,
+        run.worker_role,
+        run.adapter_id,
+        run.runner_instance_id,
+        run.pid,
+        run.status,
+        run.started_at,
+        run.finished_at,
+        run.exit_code,
+        run.error_code,
+        run.error_detail,
+        run.created_at,
+        run.updated_at,
+      );
+  }
+
+  updateDispatchRun(run: DispatchRun): void {
+    this.db
+      .prepare(
+        `UPDATE dispatch_runs SET
+          worker_role = ?, adapter_id = ?, runner_instance_id = ?, pid = ?, status = ?,
+          started_at = ?, finished_at = ?, exit_code = ?, error_code = ?, error_detail = ?,
+          updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        run.worker_role,
+        run.adapter_id,
+        run.runner_instance_id,
+        run.pid,
+        run.status,
+        run.started_at,
+        run.finished_at,
+        run.exit_code,
+        run.error_code,
+        run.error_detail,
+        run.updated_at,
+        run.id,
+      );
+  }
+
+  failActiveDispatchForTask(taskId: string, errorCode: string, errorDetail: string): void {
+    const timestamp = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE dispatch_runs
+         SET status = 'failed', finished_at = ?, error_code = ?, error_detail = ?, updated_at = ?
+         WHERE task_id = ? AND status IN ('launching','running')`,
+      )
+      .run(timestamp, errorCode, errorDetail, timestamp, taskId);
+  }
+
+  getDispatchRun(id: string): DispatchRun | undefined {
+    const row = this.db.prepare(`SELECT * FROM dispatch_runs WHERE id = ?`).get(id) as
+      | DispatchRow
+      | undefined;
+    return row ? rowToDispatch(row) : undefined;
+  }
+
+  getActiveDispatchForTask(taskId: string): DispatchRun | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM dispatch_runs
+         WHERE task_id = ? AND status IN ('launching','running')
+         ORDER BY created_at ASC LIMIT 1`,
+      )
+      .get(taskId) as DispatchRow | undefined;
+    return row ? rowToDispatch(row) : undefined;
+  }
+
+  listDispatchRunsForTask(taskId: string): DispatchRun[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM dispatch_runs WHERE task_id = ? ORDER BY created_at ASC`)
+      .all(taskId) as DispatchRow[];
+    return rows.map(rowToDispatch);
   }
 }

@@ -11,7 +11,7 @@ import {
   snapshot,
   type Connected,
 } from './helpers.ts';
-import { claimTask, createTask } from '../src/lifecycle.ts';
+import { claimTask, createTask, reportBlocked, reportResult } from '../src/lifecycle.ts';
 import type { Store } from '../src/store.ts';
 
 const DIRECT_INSTANCE = 'direct-instance';
@@ -52,9 +52,11 @@ describe('role-filtered tools', () => {
     const { owner } = await ownerSession();
     const listed = await owner.client.listTools();
     expect(listed.tools.map((tool) => tool.name).sort()).toEqual([
+      'await_delegation',
       'cancel_task',
       'close_task',
       'create_task',
+      'delegate_task',
       'get_task',
       'list_active_tasks',
       'recover_task',
@@ -236,6 +238,96 @@ describe('role-filtered tools', () => {
     expect(task.status).toBe('RUNNING');
     expect(task.execution_instance_id).toBe(DIRECT_INSTANCE);
     expect(task.blocker).toBeNull();
+  });
+
+  it('await_delegation materializes a completed dispatch in content.text', async () => {
+    const { repo, db, owner } = await ownerSession();
+    const created = await owner.client.callTool({
+      name: 'create_task',
+      arguments: { type: 'IMPLEMENTATION', payload: implPayload },
+    });
+    const createdTask = structured(created).task as { id: string; revision: number };
+    const git = snapshot(repo);
+    const claimed = claimTask(db, git, 'JUNIOR', 'owner-test-instance', createdTask.id, createdTask.revision);
+    const completed = reportResult(db, 'JUNIOR', 'owner-test-instance', {
+      task_id: claimed.id,
+      revision: claimed.revision,
+      outcome: 'completed',
+      result: implResult,
+    });
+    const now = new Date().toISOString();
+    db.insertDispatchRun({
+      id: 'dispatch-completed',
+      task_id: completed.id,
+      worker_role: 'JUNIOR',
+      adapter_id: 'codex-exec-luna',
+      runner_instance_id: 'owner-test-instance',
+      pid: 1,
+      status: 'completed',
+      started_at: now,
+      finished_at: now,
+      exit_code: 0,
+      error_code: null,
+      error_detail: null,
+      created_at: now,
+      updated_at: now,
+    });
+    const awaited = await owner.client.callTool({
+      name: 'await_delegation',
+      arguments: { dispatch_run_id: 'dispatch-completed' },
+    });
+    const text = awaited.content[0] && 'text' in awaited.content[0] ? awaited.content[0].text : '';
+    expect(text).toContain('Task ID');
+    expect(text).toContain('Dispatch Run ID');
+    expect(text).toContain('Adapter: codex-exec-luna');
+    expect(text).toContain('Outcome: completed');
+    expect(text).toContain('Summary:');
+  });
+
+  it('await_delegation materializes a blocked dispatch in content.text', async () => {
+    const { repo, db, owner } = await ownerSession();
+    const created = await owner.client.callTool({
+      name: 'create_task',
+      arguments: { type: 'IMPLEMENTATION', payload: implPayload },
+    });
+    const createdTask = structured(created).task as { id: string; revision: number };
+    const git = snapshot(repo);
+    const claimed = claimTask(db, git, 'JUNIOR', 'owner-test-instance', createdTask.id, createdTask.revision);
+    const blocked = reportBlocked(db, 'JUNIOR', 'owner-test-instance', {
+      task_id: claimed.id,
+      revision: claimed.revision,
+      blocker: {
+        reason: 'OTHER',
+        summary: 'WORKER_PROTOCOL_FAILURE',
+        need_from_owner: 'inspect worker output',
+        evidence_refs: [],
+      },
+    });
+    const now = new Date().toISOString();
+    db.insertDispatchRun({
+      id: 'dispatch-blocked',
+      task_id: blocked.id,
+      worker_role: 'JUNIOR',
+      adapter_id: 'codex-exec-luna',
+      runner_instance_id: 'owner-test-instance',
+      pid: 1,
+      status: 'blocked',
+      started_at: now,
+      finished_at: now,
+      exit_code: 1,
+      error_code: 'WORKER_PROTOCOL_FAILURE',
+      error_detail: 'missing structured result',
+      created_at: now,
+      updated_at: now,
+    });
+    const awaited = await owner.client.callTool({
+      name: 'await_delegation',
+      arguments: { dispatch_run_id: 'dispatch-blocked' },
+    });
+    const text = awaited.content[0] && 'text' in awaited.content[0] ? awaited.content[0].text : '';
+    expect(text).toContain('Outcome: blocked');
+    expect(text).toContain('Blocker Reason: OTHER');
+    expect(text).toContain('Error Code: WORKER_PROTOCOL_FAILURE');
   });
 
   it('lets an OWNER explicitly recover a RUNNING task through recover_task', async () => {
