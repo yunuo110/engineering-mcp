@@ -20,6 +20,9 @@ export type DelegateOptions = {
   timeoutMs?: number;
   runnerEntry?: string;
   runnerArgs?: string[];
+  manifestPath?: string;
+  profile?: string;
+  model?: string;
 };
 
 export async function delegateTask(
@@ -111,6 +114,9 @@ export async function delegateTask(
         run.id,
         '--adapter',
         options.adapterId,
+        ...(options.manifestPath ? ['--manifest', options.manifestPath] : []),
+        ...(options.profile ? ['--profile', options.profile] : []),
+        ...(options.model ? ['--model', options.model] : []),
         ...(options.runnerArgs ?? []),
       ],
       {

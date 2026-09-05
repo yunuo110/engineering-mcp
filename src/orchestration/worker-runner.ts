@@ -150,6 +150,18 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
     }
   }
 
+  if (workerResult && workerResult.outcome === 'blocked' && errorCode === null) {
+    const reason = workerResult.blocked_reason;
+    if (
+      reason === 'WORKER_PROCESS_FAILED' ||
+      reason === 'WORKER_PROTOCOL_FAILURE' ||
+      reason === 'SCOPE_VIOLATION' ||
+      reason === 'UNEXPECTED_HEAD_CHANGE'
+    ) {
+      errorCode = reason;
+    }
+  }
+
   const repoAfter = inspectRepo(input.git.repoRoot);
   const changedFiles = changedFilesFromRepo(input.git.repoRoot);
 

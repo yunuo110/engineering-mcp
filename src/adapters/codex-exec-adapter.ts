@@ -113,6 +113,17 @@ export class CodexExecAdapter implements WorkerAdapter {
       // ignore
     }
 
+    if (process.env.ENGINEERING_MCP_CODEX_STUB === '1') {
+      return {
+        outcome: 'completed',
+        summary: 'stub codex completed',
+        changed_files: [],
+        validation: [],
+        known_limitations: [],
+        exit_code: 0,
+      };
+    }
+
     const prompt = taskPrompt(context);
     const launch = resolveCodexLauncher();
     this.launch = launch;

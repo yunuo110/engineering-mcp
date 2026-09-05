@@ -28,6 +28,7 @@ afterEach(async () => {
   for (const store of stores.splice(0)) {
     store.close();
   }
+  await new Promise((resolve) => setTimeout(resolve, 150));
   for (const dir of dirs.splice(0)) {
     removeDir(dir);
   }

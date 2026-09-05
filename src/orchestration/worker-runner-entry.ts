@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
-import { CodexExecAdapter } from '../adapters/codex-exec-adapter.ts';
+import { createAdapter } from '../adapters/registry.ts';
 import { inspectRepo } from '../git.ts';
 import { Store } from '../store.ts';
 import { runWorkerRunner } from './worker-runner.ts';
@@ -14,6 +14,9 @@ function main(): void {
       revision: { type: 'string' },
       dispatch: { type: 'string' },
       adapter: { type: 'string' },
+      manifest: { type: 'string' },
+      profile: { type: 'string' },
+      model: { type: 'string' },
     },
     strict: true,
   });
@@ -25,7 +28,11 @@ function main(): void {
   const store = Store.open(values.store, { repoRoot: values.repo });
   const git = inspectRepo(values.repo);
   const executionInstanceId = randomUUID();
-  const adapter = values.adapter === 'codex-exec-luna' ? new CodexExecAdapter() : new CodexExecAdapter();
+  const adapter = createAdapter(values.adapter, {
+    manifestPath: values.manifest,
+    profile: values.profile,
+    model: values.model,
+  });
 
   try {
     runWorkerRunner({
