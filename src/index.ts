@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { defaultLedgerPath } from './db-path.ts';
@@ -87,7 +88,7 @@ function realpathOrCreate(path: string): string {
   try {
     return realpathSync(path);
   } catch {
-    return path;
+    return resolve(path);
   }
 }
 

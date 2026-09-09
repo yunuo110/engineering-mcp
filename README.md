@@ -30,6 +30,11 @@ Engineering truth remains in durable project state — the repository, Git histo
 
 ## Quick Start
 
+Requires Node.js 24 or newer and Git on PATH. The repository must have an initial
+commit. Creating, claiming, and resuming tasks requires a clean working tree on a
+named branch. Install and authenticate the selected Harness separately; installing
+Engineering MCP does not install or authenticate Codex or another Harness.
+
 Install from npm:
 
 ```bash
@@ -384,6 +389,24 @@ Worker testimony is not Git authority.
 
 The Runner independently verifies repository state after execution.
 
+Ignore rules do not exempt files from task scope. The Runner compares ignored
+files immediately before and after Harness execution, alongside ordinary Git
+changes. Net additions, content/permission changes, link-target changes and
+deletions must match an allowed path or directory prefix and must not match a
+forbidden path or prefix. Unchanged ignored artifacts and timestamp-only changes
+are not reported. Worker-reported filenames are not used as scope authority.
+Tasks that generate ignored build/cache output must allow those output paths.
+Other repository writers must be quiescent during execution; this comparison
+observes net changes, not which OS process made them.
+
+This requires two content-hashing passes over ignored regular files, including
+caches; large ignored trees add work proportional to their total bytes. Reads use
+bounded buffers, and symlinks are observed without following their targets.
+Unreadable entries, opaque nested repositories, special files, or an ignored-path
+listing exceeding 64 MiB fail verification rather than permit completion. This is
+a before/after check, not a record of transient writes that are fully reverted,
+and it does not monitor writes outside the repository.
+
 ### Current-Writer Fencing
 
 The persistent ledger uses a versioned writer protocol.
@@ -408,6 +431,19 @@ If a Worker Runner disappears or an active dispatch becomes orphaned, the OWNER 
 
 Engineering MCP does not silently invent successful Worker outcomes during recovery.
 
+`cancel_task` and `recover_task` revoke ledger execution authority; they do not kill
+the Harness or its child processes. Stop the old Harness process tree and inspect
+the working tree before recovery, cancellation followed by new work, or resuming.
+Otherwise the old process retains filesystem access while the ledger slot is free.
+Wait timeouts and MCP disconnects are not worker execution timeouts.
+
+If startup was interrupted after dispatch persistence but before task claim, the
+task remains `READY` with an active dispatch. Cancel it and create a replacement
+after stopping the old processes. `recover_task` accepts only `RUNNING` tasks.
+
+On Windows, the Codex `.cmd` fallback rejects paths containing `%`, `!`, quotes,
+or newlines. Use a native `codex.exe` launcher for those paths.
+
 ## Verified Compatibility
 
 Support labels are intentionally conservative.
@@ -416,24 +452,47 @@ Support labels are intentionally conservative.
 
 | Host | Support |
 | --- | --- |
-| Grok CLI | `VERIFIED` |
-| Codex CLI | `VERIFIED FOR MCP STARTUP / AUTO-REPO` |
+| Grok CLI | `REAL HOST STARTUP / HANDSHAKE / TOOL DISCOVERY` |
+| Codex CLI | `MCP STARTUP / AUTO-REPO TEST COVERAGE — CODEX HOST E2E NOT VERIFIED FOR THIS RELEASE` |
 
-Grok CLI evidence includes real MCP OWNER use, working-directory behavior, automatic repository binding, and real Worker handoff.
+The release hardening check used real Grok CLI `1.0.24` with an installed package
+in a temporary trusted project: the server started, negotiated MCP `2025-11-25`,
+and exposed ten OWNER tools. This check does not establish authenticated model
+execution or a real-host Worker handoff for 0.1.1.
 
-Codex CLI is verified as an MCP Host for startup and automatic repository discovery. Broader Codex-host behavior should not be assumed verified unless explicitly tested.
+Automatic repository discovery is exercised with a spawned startup fixture
+([auto-binding regression](test/repository-auto-binding.test.ts)); MCP startup
+and handshakes are exercised with a generic client
+([packaged-consumer regression](test/packed-delegate-task.test.ts)). Neither
+establishes a real Codex-host E2E session for this release.
 
 ### Worker Harnesses
 
 | Worker Harness | Support |
 | --- | --- |
-| Codex CLI + GPT-5.6 Luna | `VERIFIED` |
-| GenericCliAdapter | `VERIFIED CORE` |
-| DSH + DeepSeek V4 Flash Max | `VERIFIED / EXPERIMENTAL UPSTREAM CAVEAT` |
+| Codex CLI + GPT-5.6 Luna | `CONTROLLED PROCESS TESTS — AUTHENTICATED MODEL E2E NOT VERIFIED` |
+| GenericCliAdapter | `CONTROLLED HARNESS / PACKAGED MCP FLOW TESTED` |
+| DSH + DeepSeek V4 Flash Max | `HISTORICAL INTEGRATION — NOT REVALIDATED FOR 0.1.1` |
 
-The DSH path was exercised through Engineering MCP against DSH `0.1.2-rc.1` using a trusted bridge/wrapper.
+Codex worker evidence in this release covers process invocation and Windows `.cmd`
+wrapper behavior using a controlled local Harness
+([process regression](test/release-codex-process.test.ts)), plus registry and
+packaged Worker Runner execution with a deterministic Codex stub
+([registry regression](test/codex-registry-integration.test.ts),
+[packaged-consumer regression](test/packed-delegate-task.test.ts)). These tests do
+not authenticate to or execute GPT-5.6 Luna. No traceable authenticated Codex model
+E2E artifact is included for this release. Host/client test coverage above is
+separate from worker-model verification.
 
-The verified architecture is:
+Generic MCP coverage includes initialization, tool discovery, argument validation,
+controlled Harness execution, durable restart, and scope enforcement through an
+installed tarball. The validation platform for 0.1.1 is Windows with Node.js 24;
+Linux/macOS runtime validation is not claimed.
+
+The earlier DSH integration report used DSH `0.1.2-rc.1` through a trusted
+bridge/wrapper. That integration was not rerun for 0.1.1.
+
+The documented DSH integration is:
 
 ```text
 Engineering MCP

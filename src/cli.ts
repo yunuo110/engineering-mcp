@@ -11,7 +11,7 @@ import { SCHEMA_VERSION } from './types.ts';
 import { resolveRuntimeEntry } from './runtime-resolver.ts';
 import { builtinWorkerProfiles, listWorkerProfiles, loadWorkerProfiles } from './worker-profiles.ts';
 
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 const serverEntry = resolveRuntimeEntry(import.meta.url, {
   source: './index.ts',
   dist: './index.js',
