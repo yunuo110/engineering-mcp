@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -155,7 +155,9 @@ describe('packed public artifact delegation regression', () => {
 
     const installDir = tempDir('eng-mcp-install-');
     writeFileSync(join(installDir, 'package.json'), JSON.stringify({ name: 'packed-consumer', private: true }));
-    npmRun(['install', '--no-save', '--no-audit', '--no-fund', '--loglevel=error', tarballPath], installDir);
+    npmRun(['install', '--omit=dev', '--no-save', '--no-audit', '--no-fund', '--loglevel=error', tarballPath], installDir);
+    expect(existsSync(join(installDir, 'node_modules', 'typescript'))).toBe(false);
+    expect(existsSync(join(installDir, 'node_modules', '@modelcontextprotocol', 'client'))).toBe(false);
     const installedCli = join(installDir, 'node_modules', 'engineering-mcp-cli', 'dist', 'cli.js');
 
     const repo = initGitRepo();
@@ -182,6 +184,7 @@ describe('packed public artifact delegation regression', () => {
     });
     const client = new Client({ name: 'packed-delegate-test', version: '0.0.0' });
     await client.connect(transport);
+    let persistedTaskId = '';
 
     try {
       // MCP initialize handshake.
@@ -213,6 +216,7 @@ describe('packed public artifact delegation regression', () => {
       const createdBody = structured(created);
       expect(createdBody.ok).toBe(true);
       const createdTask = createdBody.task as { id: string; revision: number; status: string };
+      persistedTaskId = createdTask.id;
       expect(createdTask.status).toBe('READY');
 
       const delegated = await client.callTool({
@@ -239,7 +243,7 @@ describe('packed public artifact delegation regression', () => {
 
     // Packed profile-selection path: load a trusted profile registry at
     // process startup and delegate through an explicit generic profile.
-    const { profilesFile } = writePackedProfileFixture();
+    const { profilesFile, scriptPath } = writePackedProfileFixture();
     const profileTransport = new StdioClientTransport({
       command: process.execPath,
       args: [installedCli, '--role', 'owner', '--repo', repo, '--db', dbPath, '--worker-profiles', profilesFile],
@@ -251,6 +255,12 @@ describe('packed public artifact delegation regression', () => {
     await profileClient.connect(profileTransport);
     try {
       expect(profileClient.getServerVersion()).toBeTruthy();
+      const previous = await profileClient.callTool({ name: 'get_task', arguments: { task_id: persistedTaskId } });
+      expect(previous.structuredContent).toMatchObject({ ok: true, task: { status: 'COMPLETED', id: persistedTaskId } });
+      const invalid = await profileClient.callTool({ name: 'cancel_task', arguments: { task_id: persistedTaskId, revision: 'invalid' } });
+      expect(invalid.isError).toBe(true);
+      const stale = await profileClient.callTool({ name: 'cancel_task', arguments: { task_id: persistedTaskId, revision: 1 } });
+      expect(stale.structuredContent).toMatchObject({ ok: false, error: { code: 'REVISION_MISMATCH' } });
 
       const listed = await profileClient.callTool({ name: 'list_worker_profiles', arguments: {} });
       expect(listed.isError).toBeFalsy();
@@ -293,6 +303,30 @@ describe('packed public artifact delegation regression', () => {
       expect(profileRun.adapter_id).toBe('generic-cli');
       expect(profileRun.worker_profile_id).toBe('packed-generic');
       expect(profileTaskResult.status).toBe('COMPLETED');
+
+      // The installed runner must enforce scope even when Git ignores the write
+      // and the real child Harness reports no changed filenames.
+      writeFileSync(join(repo, '.gitignore'), 'secret.env\n');
+      git(repo, ['add', '--', 'hello.txt', '.gitignore']);
+      git(repo, ['commit', '-m', 'baseline for ignored-file packaged regression']);
+      writeFileSync(scriptPath, `const fs = require('node:fs');
+process.stdin.resume();
+process.stdin.on('end', () => {
+  fs.writeFileSync('secret.env', 'ignored forbidden write');
+  console.log(JSON.stringify({ protocol: 'engineering-worker/1', outcome: 'completed', summary: 'claims success', changed_files: [], validation: [], known_limitations: [], exit_code: 0 }));
+});
+`);
+      const ignoredCreated = await profileClient.callTool({ name: 'create_task', arguments: {
+        type: 'IMPLEMENTATION', payload: { goal: 'Work only in safe', parent_intent: 'ignored-file packed regression',
+          allowed_scope: ['safe'], forbidden_scope: ['secret.env'], acceptance_criteria: [], validation_requirements: [],
+          context_files: [], knowledge_refs: [], parent_risk: 'L1' },
+      } });
+      const ignoredTask = structured(ignoredCreated).task as { id: string; revision: number };
+      const ignoredRun = await profileClient.callTool({ name: 'delegate_task', arguments: {
+        task_id: ignoredTask.id, revision: ignoredTask.revision, worker_profile: 'packed-generic',
+      } });
+      expect(ignoredRun.structuredContent).toMatchObject({ ok: true, task: { status: 'BLOCKED', result: null },
+        dispatch_run: { status: 'blocked', error_code: 'SCOPE_VIOLATION' } });
     } finally {
       await profileClient.close();
       await profileTransport.close();

@@ -46,7 +46,7 @@ function main(): void {
     })
       .catch((error) => {
         const dispatch = store.getDispatchRun(values.dispatch!);
-        if (dispatch) {
+        if (dispatch && (dispatch.status === 'launching' || dispatch.status === 'running')) {
           const message = error instanceof Error ? error.message : String(error);
           store.updateDispatchRun({
             ...dispatch,
@@ -64,7 +64,7 @@ function main(): void {
       });
   } catch (error) {
     const dispatch = store.getDispatchRun(values.dispatch);
-    if (dispatch) {
+    if (dispatch && (dispatch.status === 'launching' || dispatch.status === 'running')) {
       store.updateDispatchRun({
         ...dispatch,
         status: 'failed',

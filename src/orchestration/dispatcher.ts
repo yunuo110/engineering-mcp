@@ -94,7 +94,7 @@ export async function delegateTask(
       });
     } catch (error) {
       const current = store.getDispatchRun(run.id);
-      if (current) {
+      if (current && (current.status === 'launching' || current.status === 'running')) {
         store.updateDispatchRun({
           ...current,
           status: 'failed',
@@ -145,17 +145,19 @@ export async function delegateTask(
     }
     child.on('error', (error) => {
       try {
-        const latest = store.getDispatchRun(run.id);
-        if (latest) {
-          store.updateDispatchRun({
-            ...latest,
-            status: 'failed',
-            finished_at: new Date().toISOString(),
-            error_code: 'WORKER_PROCESS_FAILED',
-            error_detail: `Failed to spawn worker runner: ${error.message}`,
-            updated_at: new Date().toISOString(),
-          });
-        }
+        store.transact(() => {
+          const latest = store.getDispatchRun(run.id);
+          if (latest && (latest.status === 'launching' || latest.status === 'running')) {
+            store.updateDispatchRun({
+              ...latest,
+              status: 'failed',
+              finished_at: new Date().toISOString(),
+              error_code: 'WORKER_PROCESS_FAILED',
+              error_detail: `Failed to spawn worker runner: ${error.message}`,
+              updated_at: new Date().toISOString(),
+            });
+          }
+        });
       } catch {
         // Store may already be closed; dispatch cleanup is best-effort.
       }

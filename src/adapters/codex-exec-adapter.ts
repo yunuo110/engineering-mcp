@@ -49,15 +49,15 @@ function taskPrompt(context: AdapterContext): string {
     `- Execute the required validation.`,
     `- Finish with a machine-parseable JSON object on the last line or in the final message.`,
     `Required final JSON shape:`,
-    `{"outcome":"completed|blocked","summary":"...","changed_files":["..."],"validation":[{"check":"...","status":"passed|failed|not_run"}],"known_limitations":["..."],"blocked_reason":"..."}`,
+    `{"outcome":"completed|blocked","summary":"...","changed_files":["..."],"validation":[{"check":"...","status":"passed|failed|not_run"}],"known_limitations":["..."],"blocked_reason":"...","exit_code":0}`,
   ].join('\n');
 }
 
 function quoteCmdArg(value: string): string {
-  if (/[\s""]/.test(value)) {
-    return `"${value.replaceAll('"', '\\"')}"`;
+  if (/["%!\r\n]/.test(value)) {
+    throw new Error('Codex cmd launcher does not support quotes, %, !, or newlines in arguments; use a native codex.exe launcher');
   }
-  return value;
+  return `"${value}"`;
 }
 
 function parseLastMessage(path: string): WorkerResult | undefined {
@@ -138,13 +138,15 @@ export class CodexExecAdapter implements WorkerAdapter {
             [
               '/d',
               '/s',
+              '/v:off',
               '/c',
-              `call ${quoteCmdArg(launch.executable)} ${codexArgs.map(quoteCmdArg).join(' ')}`,
+              `"${quoteCmdArg(launch.executable)} ${codexArgs.map(quoteCmdArg).join(' ')}"`,
             ],
             {
               cwd: context.repositoryRoot,
               shell: false,
               windowsHide: true,
+              windowsVerbatimArguments: true,
             },
           )
         : spawn(launch.executable, codexArgs, {
@@ -173,6 +175,12 @@ export class CodexExecAdapter implements WorkerAdapter {
     });
 
     const result = parseLastMessage(outputPath);
+    if (exitCode !== 0) {
+      return {
+        outcome: 'blocked', summary: 'Codex worker process failed', changed_files: [],
+        validation: [], known_limitations: [], blocked_reason: 'WORKER_PROCESS_FAILED', exit_code: exitCode ?? 1,
+      };
+    }
     if (result) {
       return { ...result, exit_code: exitCode ?? 1 };
     }

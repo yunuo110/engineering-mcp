@@ -196,11 +196,6 @@ export class GenericCliAdapter implements WorkerAdapter {
       }
     }
 
-    const resultSchema = ewpResultSchema.safeParse(parsed);
-    if (resultSchema.success) {
-      return ewpResultToWorkerResult(resultSchema.data);
-    }
-
     const success = this.manifest.process.success_exit_codes.includes(exitCode ?? -1);
     if (!success) {
       return {
@@ -212,6 +207,11 @@ export class GenericCliAdapter implements WorkerAdapter {
         blocked_reason: 'WORKER_PROCESS_FAILED',
         exit_code: exitCode ?? 1,
       };
+    }
+
+    const resultSchema = ewpResultSchema.safeParse(parsed);
+    if (resultSchema.success) {
+      return { ...ewpResultToWorkerResult(resultSchema.data), exit_code: exitCode! };
     }
 
     return {

@@ -9,6 +9,7 @@ import {
   implementationResultSchema,
   nowIso,
   type CreateTaskInput,
+  type DispatchRun,
   type GitSnapshot,
   type RecoverTaskInput,
   type ReportBlockedInput,
@@ -163,6 +164,7 @@ export function claimTask(
   executionInstanceId: string,
   taskId: string,
   revision: number,
+  dispatch?: DispatchRun,
 ): TaskContract {
   return store.transact(() => {
     const task = requireTask(store, taskId);
@@ -216,6 +218,7 @@ export function claimTask(
       revision: next.revision,
       detail: { execution_instance_id: next.execution_instance_id },
     });
+    if (dispatch) store.updateDispatchRun(dispatch);
     return next;
   });
 }
@@ -293,6 +296,7 @@ export function reportResult(
   actor: Role,
   executionInstanceId: string,
   input: ReportResultInput,
+  dispatch?: DispatchRun,
 ): TaskContract {
   return store.transact(() => {
     const task = requireTask(store, input.task_id);
@@ -329,6 +333,7 @@ export function reportResult(
       revision: next.revision,
       detail: { outcome: input.outcome, result },
     });
+    if (dispatch) store.updateDispatchRun(dispatch);
     return next;
   });
 }
@@ -338,6 +343,7 @@ export function reportBlocked(
   actor: Role,
   executionInstanceId: string,
   input: ReportBlockedInput,
+  dispatch?: DispatchRun,
 ): TaskContract {
   return store.transact(() => {
     const task = requireTask(store, input.task_id);
@@ -371,6 +377,7 @@ export function reportBlocked(
       revision: next.revision,
       detail: { blocker: input.blocker },
     });
+    if (dispatch) store.updateDispatchRun(dispatch);
     return next;
   });
 }

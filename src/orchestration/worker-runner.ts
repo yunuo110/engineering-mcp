@@ -1,4 +1,7 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { closeSync, lstatSync, openSync, readlinkSync, readSync } from 'node:fs';
+import { join } from 'node:path';
 import { inspectRepo } from '../git.ts';
 import { claimTask, reportBlocked, reportResult } from '../lifecycle.ts';
 import type { Store } from '../store.ts';
@@ -16,21 +19,62 @@ export type RunnerInput = {
   adapter: WorkerAdapter;
 };
 
-function changedFilesFromPorcelain(porcelain: string): string[] {
-  return porcelain
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => line.slice(3).trim())
-    .filter(Boolean);
-}
-
 function changedFilesFromRepo(repo: string): string[] {
-  const porcelain = execFileSync('git', ['-C', repo, 'status', '--porcelain=v1', '-uall'], {
+  const porcelain = execFileSync('git', ['-C', repo, 'status', '--porcelain=v1', '-z', '-uall'], {
     encoding: 'utf8',
     windowsHide: true,
-  }).trim();
-  return changedFilesFromPorcelain(porcelain);
+  });
+  const records = porcelain.split('\0');
+  const files: string[] = [];
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index]!;
+    if (!record) continue;
+    files.push(record.slice(3));
+    // In -z mode a rename/copy has a second, unprefixed source path.
+    if (/[RC]/.test(record.slice(0, 2))) {
+      const source = records[++index];
+      if (source) files.push(source);
+    }
+  }
+  return [...new Set(files)];
+}
+
+function ignoredFileSnapshot(repo: string): Map<string, string> {
+  // Git enumerates ignored leaves, including descendants of ignored directories.
+  // Do not prune caches or paths outside allowed_scope: their mutations must also
+  // obey scope. Hash content rather than timestamps so unchanged artifacts are
+  // not reported and a same-size edit with restored timestamps is still observed.
+  const ignored = execFileSync('git', ['-C', repo, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z'], {
+    encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024,
+  });
+  const snapshot = new Map<string, string>();
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  for (const file of ignored.split('\0')) {
+    if (!file) continue;
+    const path = join(repo, file);
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) {
+      // Observe the link itself; never traverse a link into another tree.
+      snapshot.set(file, `${stat.mode}:link:${readlinkSync(path)}`);
+    } else if (stat.isFile()) {
+      const hash = createHash('sha256');
+      const fd = openSync(path, 'r');
+      try {
+        let bytes: number;
+        while ((bytes = readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+          hash.update(buffer.subarray(0, bytes));
+        }
+      } finally {
+        closeSync(fd);
+      }
+      snapshot.set(file, `${stat.mode}:file:${hash.digest('hex')}`);
+    } else {
+      // An opaque nested repository or special file cannot be verified by this
+      // file-content observer. Fail closed instead of treating it as unchanged.
+      throw new Error(`Cannot verify ignored repository entry: ${file}`);
+    }
+  }
+  return snapshot;
 }
 
 function isAllowedFile(task: TaskContract, file: string): boolean {
@@ -76,6 +120,9 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
   if (!dispatch) {
     throw new Error(`dispatch run not found: ${input.dispatchRunId}`);
   }
+  if (dispatch.task_id !== input.taskId || dispatch.status !== 'launching') {
+    throw new Error('dispatch is not launching for this task');
+  }
 
   const taskBefore = input.store.getTask(input.taskId);
   if (!taskBefore) {
@@ -96,20 +143,17 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
     input.executionInstanceId,
     input.taskId,
     input.expectedRevision,
-  );
-
-  // Claim succeeded before adapter is launched.
-  const timestampAfterClaim = new Date().toISOString();
-  const dispatchAfterClaim = input.store.getDispatchRun(input.dispatchRunId);
-  if (dispatchAfterClaim) {
-    input.store.updateDispatchRun({
-      ...dispatchAfterClaim,
+    {
+      ...dispatch,
       status: 'running',
       runner_instance_id: input.executionInstanceId,
-      started_at: timestampAfterClaim,
-      updated_at: timestampAfterClaim,
-    });
-  }
+      started_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+  );
+  // Snapshot after our claim transaction, so an ignored in-repository ledger
+  // does not make the runner's own bookkeeping look like a worker mutation.
+  const ignoredBefore = ignoredFileSnapshot(input.git.repoRoot);
 
   let workerResult: WorkerResult | null = null;
   let errorCode: string | null = null;
@@ -163,7 +207,15 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
   }
 
   const repoAfter = inspectRepo(input.git.repoRoot);
-  const changedFiles = changedFilesFromRepo(input.git.repoRoot);
+  const changed = new Set(changedFilesFromRepo(input.git.repoRoot));
+  const ignoredAfter = ignoredFileSnapshot(input.git.repoRoot);
+  for (const file of new Set([...ignoredBefore.keys(), ...ignoredAfter.keys()])) {
+    if (ignoredBefore.get(file) !== ignoredAfter.get(file)) {
+      changed.add(file);
+    }
+  }
+  const changedFiles = [...changed];
+  if (workerResult) workerResult.changed_files = changedFiles;
 
   if (workerResult && workerResult.outcome === 'completed') {
     if (repoAfter.head !== claimed.base_commit) {
@@ -188,6 +240,18 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
   }
 
   const timestamp = new Date().toISOString();
+  const finalDispatch = input.store.getDispatchRun(input.dispatchRunId);
+  if (!finalDispatch || finalDispatch.status !== 'running' || finalDispatch.runner_instance_id !== input.executionInstanceId) {
+    throw new Error('dispatch execution ownership lost');
+  }
+  const dispatchResult = {
+    ...finalDispatch,
+    finished_at: timestamp,
+    exit_code: workerResult?.exit_code ?? null,
+    error_code: errorCode,
+    error_detail: workerResult?.blocked_reason ?? null,
+    updated_at: timestamp,
+  };
   let terminal: TaskContract;
   if (workerResult && workerResult.outcome === 'completed' && errorCode === null) {
     terminal = reportResult(input.store, 'JUNIOR', input.executionInstanceId, {
@@ -195,7 +259,7 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
       revision: claimed.revision,
       outcome: 'completed',
       result: resultForWorker(claimed, workerResult, repoAfter),
-    });
+    }, { ...dispatchResult, status: 'completed' });
   } else {
     const result = workerResult ?? {
       outcome: 'blocked' as const,
@@ -210,20 +274,7 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
       task_id: claimed.id,
       revision: claimed.revision,
       blocker: blockerForError(claimed, result, errorCode ?? 'WORKER_PROTOCOL_FAILURE'),
-    });
-  }
-
-  const finalDispatch = input.store.getDispatchRun(input.dispatchRunId);
-  if (finalDispatch) {
-    input.store.updateDispatchRun({
-      ...finalDispatch,
-      status: terminal.status === 'COMPLETED' ? 'completed' : 'blocked',
-      finished_at: timestamp,
-      exit_code: workerResult?.exit_code ?? null,
-      error_code: errorCode,
-      error_detail: workerResult?.blocked_reason ?? null,
-      updated_at: timestamp,
-    });
+    }, { ...dispatchResult, status: 'blocked' });
   }
 
   return terminal;
