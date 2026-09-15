@@ -44,7 +44,7 @@ The resolved repository is immutable for the process lifetime.
 
 ### Ledger
 
-The SQLite ledger stores tasks, events, dispatch runs, and repository binding metadata. It is persisted outside the repository under the user data directory by default. Ledger paths are deterministic per repository root and are never included in source control.
+The SQLite ledger stores tasks, append-only task events, immutable-checkpoint provenance, dispatch runs, and repository binding metadata. It is persisted outside the repository under the user data directory by default. Ledger paths are deterministic per repository root and are never included in source control.
 
 ### Store and lifecycle
 
@@ -56,6 +56,23 @@ The Store owns:
 - writer-generation fencing;
 - schema migrations;
 - repository binding validation.
+
+Dirty implementation handoff is explicit. `checkpoint_task` accepts only purpose-compatible
+terminal implementation tasks, rejects Git-visible changes outside the task scope and every
+changed gitlink, and records a durable intent before Git mutation. The prepared operation converges
+through Git application and ledger finalization to one immutable commit/ref identity. It never uses
+stash, reset, or discard. A `RESUME` checkpoint becomes the task's recovery baseline; a `REVIEW`
+checkpoint is consumed only by `create_diagnosis_from_checkpoint`, which persists the producer and
+checkpoint linkage on the diagnosis task.
+
+Schema V8 uses a `+3` writer-generation protocol. Database triggers reject the legacy V7 `+2`
+mutation pattern even from a connection opened before migration, and an unfinished checkpoint
+intent fences task and dispatch lifecycle mutation for the entire repository. The only mutating
+exception is the exact producer/revision/request retry required to finalize that intent.
+
+Targeted workers use `inspect_claimable_task` to obtain a minimal claim ticket. Payload visibility
+does not expand until `claim_task` succeeds. Optimistic revision and all repository/role checks are
+still enforced by the atomic claim.
 
 ### Trusted Worker Runner
 

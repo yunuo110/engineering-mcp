@@ -1,7 +1,8 @@
 import { z } from 'zod/v4';
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 export const BUSY_TIMEOUT_MS = 5000;
+export const WRITER_PROTOCOL_GENERATION = 3;
 
 export const ROLES = ['OWNER', 'JUNIOR', 'PRINCIPAL'] as const;
 export type Role = (typeof ROLES)[number];
@@ -38,6 +39,7 @@ export const EVENT_KINDS = [
   'resumed',
   'cancelled',
   'closed',
+  'checkpointed',
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 export const eventKindSchema = z.enum(EVENT_KINDS);
@@ -74,24 +76,108 @@ export type TaskPayload = z.infer<typeof taskPayloadSchema>;
 
 export const validationStatusSchema = z.enum(['passed', 'failed', 'not_run']);
 
-export const validationEntrySchema = z.object({
-  check: z.string().min(1),
-  status: validationStatusSchema,
+export const validationCountsSchema = z.object({
+  passed: z.number().int().nonnegative().optional(),
+  failed: z.number().int().nonnegative().optional(),
+  skipped: z.number().int().nonnegative().optional(),
+  total: z.number().int().nonnegative().optional(),
 });
+
+export const validationEntrySchema = z
+  .object({
+    check: z.string().min(1).optional(),
+    command: z.string().min(1).optional(),
+    status: validationStatusSchema,
+    summary: z.string().min(1).optional(),
+    counts: validationCountsSchema.optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (!value.check && !value.command) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'validation evidence requires check or command',
+        path: ['check'],
+      });
+    }
+  });
 
 export const workingTreeStatusSchema = z.object({
   clean: z.boolean(),
   porcelain: z.string(),
 });
 
+export const gitEvidenceSchema = z.object({
+  head: z.string().min(1).optional(),
+  branch: z.string().min(1).optional(),
+  working_tree_status: workingTreeStatusSchema.optional(),
+  diff_check: z
+    .object({
+      command: z.string().min(1).optional(),
+      status: validationStatusSchema,
+      summary: z.string().min(1).optional(),
+    })
+    .optional(),
+});
+
+export const environmentEvidenceSchema = z.object({
+  cwd: z.string().min(1).optional(),
+  platform: z.string().min(1).optional(),
+  runtime: z.string().min(1).optional(),
+  head: z.string().min(1).optional(),
+  branch: z.string().min(1).optional(),
+});
+
+export const workerReportedEvidenceSchema = z.object({
+  implementation_complete: z.boolean().optional(),
+  changed_files: z.array(z.string()).optional(),
+  validation: z.array(validationEntrySchema).optional(),
+  git: gitEvidenceSchema.optional(),
+  environment: environmentEvidenceSchema.optional(),
+  blocker_classification: z.lazy(() => blockerReasonSchema).optional(),
+});
+
+export const runnerObservedEvidenceSchema = z.object({
+  changed_files: z.array(z.string()),
+  git: z.object({
+    head: z.string().min(1),
+    branch: z.string().min(1),
+    working_tree_status: workingTreeStatusSchema,
+  }),
+  scope: z.object({
+    status: z.enum(['passed', 'failed']),
+    rejected_files: z.array(z.string()),
+  }),
+});
+
+export const serverAuthoritativeEvidenceSchema = z.object({
+  task_id: z.string().min(1),
+  task_type: taskTypeSchema,
+  producer_revision: z.number().int().positive(),
+  actor_role: roleSchema,
+  repo_root: z.string().min(1),
+  base_commit: z.string().min(1),
+  branch: z.string().min(1),
+});
+
+export const evidenceEnvelopeSchema = z.object({
+  worker_reported: workerReportedEvidenceSchema.optional(),
+  runner_observed: runnerObservedEvidenceSchema.optional(),
+  server_authoritative: serverAuthoritativeEvidenceSchema.optional(),
+});
+export type RunnerObservedEvidence = z.infer<typeof runnerObservedEvidenceSchema>;
+
 export const implementationResultSchema = z.object({
   summary: z.string().min(1),
+  implementation_complete: z.boolean().optional(),
   changed_files: z.array(z.string()),
   validation: z.array(validationEntrySchema),
+  git: gitEvidenceSchema.optional(),
+  environment: environmentEvidenceSchema.optional(),
   existing_tests_changed: z.array(z.string()),
   scope_changes: z.array(z.string()),
   unverified: z.array(z.string()),
   working_tree_status: workingTreeStatusSchema,
+  evidence: evidenceEnvelopeSchema.optional(),
 });
 export type ImplementationResult = z.infer<typeof implementationResultSchema>;
 
@@ -117,6 +203,12 @@ export const diagnosisResultSchema = z
     implementation_recommendation: implementationRecommendationSchema,
     confidence: diagnosisConfidenceSchema,
     remaining_unknowns: z.array(z.string()),
+    implementation_complete: z.boolean().optional(),
+    changed_files: z.array(z.string()).optional(),
+    validation: z.array(validationEntrySchema).optional(),
+    git: gitEvidenceSchema.optional(),
+    environment: environmentEvidenceSchema.optional(),
+    evidence: evidenceEnvelopeSchema.optional(),
   })
   .superRefine((value, ctx) => {
     if (value.verdict === 'INSUFFICIENT_EVIDENCE') {
@@ -150,6 +242,12 @@ export const taskResultSchema = z.union([implementationResultSchema, diagnosisRe
 export type TaskResult = z.infer<typeof taskResultSchema>;
 
 export const blockerReasonSchema = z.enum([
+  'CODE',
+  'TEST_FAILURE',
+  'VALIDATION_ENVIRONMENT',
+  'PERMISSION',
+  'TOOL_FAILURE',
+  'EXTERNAL_DEPENDENCY',
   'SCOPE_CONFLICT',
   'PLAN_CONFLICT',
   'DECISION_REQUIRED',
@@ -173,6 +271,12 @@ const blockerFieldsSchema = z.object({
   summary: z.string().min(1),
   need_from_owner: z.string().min(1),
   evidence_refs: z.array(z.string()),
+  implementation_complete: z.boolean().optional(),
+  changed_files: z.array(z.string()).optional(),
+  validation: z.array(validationEntrySchema).optional(),
+  git: gitEvidenceSchema.optional(),
+  environment: environmentEvidenceSchema.optional(),
+  evidence: evidenceEnvelopeSchema.optional(),
 });
 
 export const workerBlockerSchema = blockerFieldsSchema;
@@ -180,6 +284,16 @@ export const blockerSchema = blockerFieldsSchema.extend({
   recovery: recoveryMetadataSchema.optional(),
 });
 export type Blocker = z.infer<typeof blockerSchema>;
+
+export const reviewSourceSchema = z.object({
+  checkpoint_id: z.string().min(1),
+  producer_task_id: z.string().min(1),
+  producer_revision: z.number().int().positive(),
+  checkpoint_commit: z.string().min(1),
+  checkpoint_ref: z.string().min(1),
+  prior_base_commit: z.string().min(1),
+});
+export type ReviewSource = z.infer<typeof reviewSourceSchema>;
 
 export const taskContractSchema = z.object({
   id: z.string().min(1),
@@ -192,6 +306,7 @@ export const taskContractSchema = z.object({
   repo_root: z.string().min(1),
   base_commit: z.string().min(1),
   branch: z.string().min(1),
+  source_checkpoint: reviewSourceSchema.nullable(),
   payload: taskPayloadSchema,
   result: taskResultSchema.nullable(),
   blocker: blockerSchema.nullable(),
@@ -232,6 +347,20 @@ export const listActiveTasksInputSchema = z.object({
 
 export const claimTaskInputSchema = taskIdRevisionSchema;
 
+export const inspectClaimableTaskInputSchema = getTaskInputSchema;
+
+export const claimTicketSchema = z.object({
+  task_id: z.string().min(1),
+  type: taskTypeSchema,
+  status: z.literal('READY'),
+  revision: z.number().int().positive(),
+  assignee_role: assigneeRoleSchema,
+  repo_root: z.string().min(1),
+  base_commit: z.string().min(1),
+  branch: z.string().min(1),
+});
+export type ClaimTicket = z.infer<typeof claimTicketSchema>;
+
 export const claimNextTaskInputSchema = z.object({});
 
 export const reportResultInputSchema = z.object({
@@ -258,6 +387,64 @@ export type ResumeTaskInput = z.infer<typeof resumeTaskInputSchema>;
 
 export const recoverTaskInputSchema = taskIdRevisionSchema;
 export type RecoverTaskInput = z.infer<typeof recoverTaskInputSchema>;
+
+export const checkpointPurposeSchema = z.enum(['RESUME', 'REVIEW']);
+export type CheckpointPurpose = z.infer<typeof checkpointPurposeSchema>;
+
+export const checkpointTaskInputSchema = taskIdRevisionSchema.extend({
+  purpose: checkpointPurposeSchema,
+});
+export type CheckpointTaskInput = z.infer<typeof checkpointTaskInputSchema>;
+
+export const taskCheckpointSchema = z.object({
+  id: z.string().min(1),
+  task_id: z.string().min(1),
+  producer_revision: z.number().int().positive(),
+  purpose: checkpointPurposeSchema,
+  state: z.literal('FINALIZED'),
+  request_identity: z.string().min(1),
+  repo_root: z.string().min(1),
+  prior_base_commit: z.string().min(1),
+  expected_tree: z.string().min(1),
+  scope_identity: z.string().min(1),
+  checkpoint_commit: z.string().min(1),
+  checkpoint_ref: z.string().min(1),
+  branch: z.string().min(1),
+  changed_files: z.array(z.string()),
+  created_at: z.string().min(1),
+  finalized_at: z.string().min(1),
+});
+export type TaskCheckpoint = z.infer<typeof taskCheckpointSchema>;
+
+export const checkpointStateSchema = z.enum(['PREPARED', 'GIT_APPLIED', 'FINALIZING', 'FINALIZED']);
+export type CheckpointState = z.infer<typeof checkpointStateSchema>;
+
+export type CheckpointIntent = {
+  id: string;
+  task_id: string;
+  producer_revision: number;
+  purpose: CheckpointPurpose;
+  state: CheckpointState;
+  request_identity: string;
+  repo_root: string;
+  prior_base_commit: string;
+  expected_tree: string;
+  scope_identity: string;
+  checkpoint_commit: string | null;
+  checkpoint_ref: string;
+  branch: string;
+  changed_files: string[];
+  created_at: string;
+  finalized_at: string | null;
+};
+
+export const createDiagnosisFromCheckpointInputSchema = z.object({
+  producer_task_id: z.string().min(1),
+  producer_revision: z.number().int().positive(),
+  checkpoint_id: z.string().min(1),
+  payload: diagnosisPayloadSchema,
+}).strict();
+export type CreateDiagnosisFromCheckpointInput = z.infer<typeof createDiagnosisFromCheckpointInputSchema>;
 
 export const delegateTaskInputSchema = taskIdRevisionSchema.extend({
   worker_profile: z.string().min(1).optional(),
@@ -307,6 +494,7 @@ export const dispatchToolOutputSchema = z.discriminatedUnion('ok', [
     ok: z.literal(true),
     dispatch_run: z.record(z.string(), z.unknown()),
     task: taskContractSchema,
+    receipt: z.lazy(() => transitionReceiptSchema),
     still_running: z.boolean().optional(),
   }),
   failureOutputSchema,
@@ -324,14 +512,48 @@ export const closeTaskInputSchema = z.object({
   decision: z.string().min(1).optional(),
 });
 
+export const delegationReceiptSchema = z.object({
+  dispatch_run_id: z.string().min(1),
+  worker_profile: z.string().min(1).nullable(),
+  worker_role: assigneeRoleSchema,
+  adapter_id: z.string().min(1),
+  state: z.string().min(1),
+});
+
+export const transitionReceiptSchema = z.object({
+  task_id: z.string().min(1),
+  type: taskTypeSchema,
+  previous_status: taskStatusSchema.nullable(),
+  status: taskStatusSchema,
+  revision: z.number().int().positive(),
+  assignee_role: assigneeRoleSchema.nullable(),
+  repo_root: z.string().min(1),
+  base_commit: z.string().min(1),
+  branch: z.string().min(1),
+  delegation: delegationReceiptSchema.optional(),
+  checkpoint: taskCheckpointSchema.optional(),
+  source_checkpoint: reviewSourceSchema.optional(),
+});
+export type TransitionReceipt = z.infer<typeof transitionReceiptSchema>;
+
 
 export const taskSuccessOutputSchema = z.object({
   ok: z.literal(true),
   task: taskContractSchema,
+  receipt: transitionReceiptSchema.optional(),
 });
 
 export const taskToolOutputSchema = z.discriminatedUnion('ok', [
   taskSuccessOutputSchema,
+  failureOutputSchema,
+]);
+
+export const transitionTaskToolOutputSchema = z.discriminatedUnion('ok', [
+  z.object({
+    ok: z.literal(true),
+    task: taskContractSchema,
+    receipt: transitionReceiptSchema,
+  }),
   failureOutputSchema,
 ]);
 
@@ -342,6 +564,24 @@ export const listSuccessOutputSchema = z.object({
 
 export const listToolOutputSchema = z.discriminatedUnion('ok', [
   listSuccessOutputSchema,
+  failureOutputSchema,
+]);
+
+export const claimTicketToolOutputSchema = z.discriminatedUnion('ok', [
+  z.object({
+    ok: z.literal(true),
+    claim_ticket: claimTicketSchema,
+  }),
+  failureOutputSchema,
+]);
+
+export const checkpointToolOutputSchema = z.discriminatedUnion('ok', [
+  z.object({
+    ok: z.literal(true),
+    task: taskContractSchema,
+    checkpoint: taskCheckpointSchema,
+    receipt: transitionReceiptSchema,
+  }),
   failureOutputSchema,
 ]);
 

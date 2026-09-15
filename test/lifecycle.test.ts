@@ -133,7 +133,8 @@ describe('lifecycle', () => {
       result: implResult,
     });
     expect(done.status).toBe('COMPLETED');
-    expect(done.result).toEqual(implResult);
+    expect(done.result).toMatchObject(implResult);
+    expect(done.result?.evidence?.server_authoritative?.task_id).toBe(done.id);
     expect(db.getRunning()).toBeUndefined();
     const diag = createTask(db, cleanGit(), { type: 'DIAGNOSIS', payload: diagnosisPayload });
     const claimedDiag = claimTask(db, cleanGit(), 'PRINCIPAL', EXECUTION_INSTANCE, diag.id, diag.revision);

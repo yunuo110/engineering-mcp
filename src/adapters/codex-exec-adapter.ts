@@ -49,7 +49,7 @@ function taskPrompt(context: AdapterContext): string {
     `- Execute the required validation.`,
     `- Finish with a machine-parseable JSON object on the last line or in the final message.`,
     `Required final JSON shape:`,
-    `{"outcome":"completed|blocked","summary":"...","changed_files":["..."],"validation":[{"check":"...","status":"passed|failed|not_run"}],"known_limitations":["..."],"blocked_reason":"...","exit_code":0}`,
+    `{"outcome":"completed|blocked","summary":"...","implementation_complete":true,"changed_files":["..."],"validation":[{"command":"...","status":"passed|failed|not_run","summary":"...","counts":{"passed":0,"failed":0,"total":0}}],"git":{"diff_check":{"command":"git diff --check","status":"passed|failed|not_run"}},"environment":{"cwd":"...","platform":"...","runtime":"..."},"known_limitations":["..."],"blocker_classification":"CODE|TEST_FAILURE|VALIDATION_ENVIRONMENT|PERMISSION|TOOL_FAILURE|EXTERNAL_DEPENDENCY|OTHER","blocked_reason":"...","exit_code":0}`,
   ].join('\n');
 }
 
@@ -179,6 +179,7 @@ export class CodexExecAdapter implements WorkerAdapter {
       return {
         outcome: 'blocked', summary: 'Codex worker process failed', changed_files: [],
         validation: [], known_limitations: [], blocked_reason: 'WORKER_PROCESS_FAILED', exit_code: exitCode ?? 1,
+        runner_error_code: 'WORKER_PROCESS_FAILED',
       };
     }
     if (result) {
@@ -193,6 +194,7 @@ export class CodexExecAdapter implements WorkerAdapter {
       known_limitations: [],
       blocked_reason: 'WORKER_PROTOCOL_FAILURE',
       exit_code: exitCode ?? 1,
+      runner_error_code: 'WORKER_PROTOCOL_FAILURE',
     };
   }
 }

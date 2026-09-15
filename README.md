@@ -140,6 +140,8 @@ Core OWNER tools include:
 - `delegate_task`
 - `await_delegation`
 - `recover_task`
+- `checkpoint_task`
+- `create_diagnosis_from_checkpoint`
 - `resume_task`
 - `cancel_task`
 - `close_task`
@@ -178,6 +180,26 @@ OWNER handback
 ```
 
 Harnesses do not own Engineering MCP lifecycle state.
+
+When an implementation reaches `BLOCKED`, `FAILED`, or `COMPLETED` with valuable dirty output,
+the OWNER can call `checkpoint_task`. The operation first records a durable intent, rejects
+out-of-scope changes and changed gitlinks, then writes an immutable Git commit plus a namespaced
+checkpoint ref and advances the recorded branch without stashing or discarding files. A `RESUME`
+checkpoint can feed `resume_task`. A `REVIEW` checkpoint can only feed
+`create_diagnosis_from_checkpoint`, which binds the diagnosis task to the producer revision and
+checkpoint commit instead of whichever clean HEAD happens to exist later.
+While a checkpoint intent is unfinished, it is a repository-global lifecycle fence: only the exact
+checkpoint retry and read-only inspection may proceed. Task and dispatch writes resume after finalization.
+
+JUNIOR and PRINCIPAL processes can call `inspect_claimable_task(task_id)` before a targeted claim.
+It returns only the READY task's revision and repository/role binding, never the task payload.
+`claim_task` still performs the atomic revision, role, task-type, branch, HEAD, and clean-baseline
+checks.
+
+Every successful lifecycle transition includes a `receipt` with task identity, prior/current
+status, revision, assignee, and repository baseline. Delegation receipts also contain dispatch
+identity/profile/state; checkpoint receipts contain checkpoint provenance. Existing full `task`
+and `dispatch_run` response fields remain available.
 
 ## Worker Profiles
 
@@ -322,6 +344,8 @@ It includes engineering information such as:
 - terminal outcome;
 - changed files;
 - validation results;
+- optional validation counts, Git/diff evidence, execution environment, and blocker classification,
+  retained under distinct worker-reported, runner-observed, and server-authoritative sources;
 - known limitations.
 
 EWP intentionally does **not** contain:

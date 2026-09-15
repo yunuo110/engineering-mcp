@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Immutable implementation checkpoints with durable Git/ledger provenance for
+  blocked takeover and completed review handoff.
+- Dedicated diagnosis creation bound to a finalized `REVIEW` checkpoint.
+- Minimal targeted-claim tickets for workers without pre-claim task-payload access.
+- Optional structured validation, Git, environment, completion, and blocker evidence.
+- Uniform lifecycle transition receipts, including delegation and checkpoint metadata.
+
+### Changed
+
+- Ledger schema V8 adds recoverable checkpoint intents, authoritative review linkage,
+  and the `checkpointed` task event. Its `+3` writer protocol fences pre-open V7
+  connections that still issue the legacy `+2` mutation pattern. Unfinished checkpoint
+  intents now fence task and dispatch mutations repository-wide until exact retry finalizes them.
+- Worker evidence is separated into worker-reported, runner-observed, and
+  server-authoritative layers; authoritative runner failures take precedence.
+
 ## [0.1.1] - 2026-09-09
 
 ### Fixed

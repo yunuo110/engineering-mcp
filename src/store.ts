@@ -5,17 +5,23 @@ import { DomainError } from './errors.ts';
 import {
   BUSY_TIMEOUT_MS,
   SCHEMA_VERSION,
+  WRITER_PROTOCOL_GENERATION,
   blockerSchema,
+  checkpointPurposeSchema,
+  checkpointStateSchema,
   eventKindSchema,
   roleSchema,
   taskContractSchema,
+  taskCheckpointSchema,
   taskPayloadSchema,
   taskResultSchema,
   taskStatusSchema,
   type DispatchRun,
+  type CheckpointIntent,
   type EventKind,
   type Role,
   type TaskContract,
+  type TaskCheckpoint,
   type TaskEvent,
   type TaskStatus,
   type TaskType,
@@ -33,6 +39,12 @@ CREATE TABLE tasks (
   repo_root TEXT NOT NULL,
   base_commit TEXT NOT NULL,
   branch TEXT NOT NULL,
+  source_checkpoint_id TEXT,
+  source_task_id TEXT,
+  source_task_revision INTEGER,
+  source_checkpoint_commit TEXT,
+  source_checkpoint_ref TEXT,
+  source_prior_base_commit TEXT,
   payload_json TEXT NOT NULL,
   result_json TEXT,
   blocker_json TEXT,
@@ -60,7 +72,7 @@ CREATE TABLE task_events (
   detail_json TEXT,
   writer_generation INTEGER NOT NULL DEFAULT 1,
   CHECK (actor_role IN ('OWNER','JUNIOR','PRINCIPAL')),
-  CHECK (kind IN ('created','claimed','result','blocked','resumed','cancelled','closed'))
+  CHECK (kind IN ('created','claimed','result','blocked','resumed','cancelled','closed','checkpointed'))
 ) STRICT;
 
 CREATE TABLE ledger_metadata (
@@ -89,9 +101,56 @@ CREATE TABLE dispatch_runs (
   CHECK (status IN ('launching','running','completed','blocked','failed'))
 ) STRICT;
 
+CREATE TABLE task_checkpoints (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  producer_revision INTEGER NOT NULL,
+  purpose TEXT NOT NULL,
+  state TEXT NOT NULL,
+  request_identity TEXT NOT NULL UNIQUE,
+  repo_root TEXT NOT NULL,
+  prior_base_commit TEXT NOT NULL,
+  expected_tree TEXT NOT NULL,
+  scope_identity TEXT NOT NULL,
+  checkpoint_commit TEXT UNIQUE,
+  checkpoint_ref TEXT NOT NULL UNIQUE,
+  branch TEXT NOT NULL,
+  changed_files_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  finalized_at TEXT,
+  UNIQUE (task_id, producer_revision),
+  CHECK (purpose IN ('RESUME','REVIEW')),
+  CHECK (state IN ('PREPARED','GIT_APPLIED','FINALIZING','FINALIZED')),
+  CHECK ((state IN ('PREPARED','GIT_APPLIED') AND checkpoint_commit IS NULL AND finalized_at IS NULL)
+      OR (state = 'FINALIZING' AND checkpoint_commit IS NOT NULL AND finalized_at IS NULL)
+      OR (state = 'FINALIZED' AND checkpoint_commit IS NOT NULL AND finalized_at IS NOT NULL)),
+  CHECK (producer_revision >= 1)
+) STRICT;
+
+CREATE UNIQUE INDEX one_unfinished_checkpoint
+ON task_checkpoints((1))
+WHERE state != 'FINALIZED';
+
 CREATE UNIQUE INDEX one_active_dispatch_per_task
 ON dispatch_runs(task_id)
 WHERE status IN ('launching','running');
+
+CREATE TRIGGER trg_task_checkpoints_exclusive_insert
+BEFORE INSERT ON task_checkpoints
+BEGIN
+  SELECT RAISE(ABORT, 'TASK_ALREADY_RUNNING task=' || t.id)
+  FROM tasks t WHERE t.status = 'RUNNING' LIMIT 1;
+  SELECT RAISE(ABORT, 'CHECKPOINT_ACTIVE_DISPATCH dispatch=' || d.id || ' task=' || d.task_id)
+  FROM dispatch_runs d WHERE d.status IN ('launching','running') LIMIT 1;
+END;
+
+CREATE TRIGGER trg_task_checkpoints_single_unfinished_insert
+BEFORE INSERT ON task_checkpoints
+WHEN NEW.state != 'FINALIZED'
+BEGIN
+  SELECT RAISE(ABORT, 'CHECKPOINT_FINALIZATION_REQUIRED task=' || c.task_id || ' checkpoint=' || c.id || ' state=' || c.state)
+  FROM task_checkpoints c WHERE c.state != 'FINALIZED' LIMIT 1;
+END;
 
 CREATE TRIGGER trg_tasks_execution_invariant_insert
 BEFORE INSERT ON tasks
@@ -137,7 +196,7 @@ BEFORE INSERT ON tasks
 BEGIN
   SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
   WHERE NEW.writer_generation IS NULL
-     OR NEW.writer_generation != 2;
+     OR NEW.writer_generation != ${WRITER_PROTOCOL_GENERATION};
 END;
 
 CREATE TRIGGER trg_tasks_writer_protocol_update
@@ -145,7 +204,7 @@ BEFORE UPDATE ON tasks
 BEGIN
   SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
   WHERE NEW.writer_generation IS NULL
-     OR NEW.writer_generation != OLD.writer_generation + 2;
+     OR NEW.writer_generation != OLD.writer_generation + ${WRITER_PROTOCOL_GENERATION};
 END;
 
 CREATE TRIGGER trg_task_events_writer_protocol_insert
@@ -153,7 +212,7 @@ BEFORE INSERT ON task_events
 BEGIN
   SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
   WHERE NEW.writer_generation IS NULL
-     OR NEW.writer_generation != 2;
+     OR NEW.writer_generation != ${WRITER_PROTOCOL_GENERATION};
 END;
 
 CREATE TRIGGER trg_dispatch_runs_writer_protocol_insert
@@ -161,7 +220,7 @@ BEFORE INSERT ON dispatch_runs
 BEGIN
   SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
   WHERE NEW.writer_generation IS NULL
-     OR NEW.writer_generation != 2;
+     OR NEW.writer_generation != ${WRITER_PROTOCOL_GENERATION};
 END;
 
 CREATE TRIGGER trg_dispatch_runs_writer_protocol_update
@@ -169,7 +228,87 @@ BEFORE UPDATE ON dispatch_runs
 BEGIN
   SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
   WHERE NEW.writer_generation IS NULL
-     OR NEW.writer_generation != OLD.writer_generation + 2;
+     OR NEW.writer_generation != OLD.writer_generation + ${WRITER_PROTOCOL_GENERATION};
+END;
+
+CREATE TRIGGER trg_tasks_checkpoint_fence_update
+BEFORE UPDATE ON tasks
+WHEN EXISTS (SELECT 1 FROM task_checkpoints c WHERE c.state != 'FINALIZED')
+BEGIN
+  SELECT RAISE(ABORT, 'CHECKPOINT_FINALIZATION_REQUIRED task=' || c.task_id || ' checkpoint=' || c.id || ' state=' || c.state)
+  FROM task_checkpoints c
+  WHERE c.state != 'FINALIZED' AND NOT EXISTS (
+    SELECT 1 FROM task_checkpoints c
+    WHERE c.task_id = OLD.id AND c.state = 'FINALIZING'
+      AND OLD.revision = c.producer_revision AND NEW.revision = c.producer_revision + 1
+      AND NEW.base_commit = c.checkpoint_commit AND NEW.status = OLD.status
+      AND NEW.assignee_role IS OLD.assignee_role
+      AND NEW.execution_instance_id IS OLD.execution_instance_id
+      AND NEW.type = OLD.type AND NEW.owner_role = OLD.owner_role
+      AND NEW.repo_root = OLD.repo_root AND NEW.branch = OLD.branch
+      AND NEW.payload_json = OLD.payload_json
+      AND NEW.result_json IS OLD.result_json AND NEW.blocker_json IS OLD.blocker_json
+      AND NEW.source_checkpoint_id IS OLD.source_checkpoint_id
+      AND NEW.source_task_id IS OLD.source_task_id
+      AND NEW.source_task_revision IS OLD.source_task_revision
+      AND NEW.source_checkpoint_commit IS OLD.source_checkpoint_commit
+      AND NEW.source_checkpoint_ref IS OLD.source_checkpoint_ref
+      AND NEW.source_prior_base_commit IS OLD.source_prior_base_commit
+      AND NEW.created_at = OLD.created_at
+  ) LIMIT 1;
+END;
+
+CREATE TRIGGER trg_tasks_checkpoint_fence_insert
+BEFORE INSERT ON tasks
+WHEN EXISTS (SELECT 1 FROM task_checkpoints c WHERE c.state != 'FINALIZED')
+BEGIN
+  SELECT RAISE(ABORT, 'CHECKPOINT_FINALIZATION_REQUIRED task=' || c.task_id || ' checkpoint=' || c.id || ' state=' || c.state)
+  FROM task_checkpoints c WHERE c.state != 'FINALIZED' LIMIT 1;
+END;
+
+CREATE TRIGGER trg_dispatch_runs_checkpoint_fence_insert
+BEFORE INSERT ON dispatch_runs
+WHEN EXISTS (SELECT 1 FROM task_checkpoints c WHERE c.state != 'FINALIZED')
+BEGIN
+  SELECT RAISE(ABORT, 'CHECKPOINT_FINALIZATION_REQUIRED task=' || c.task_id || ' checkpoint=' || c.id || ' state=' || c.state)
+  FROM task_checkpoints c WHERE c.state != 'FINALIZED' LIMIT 1;
+END;
+
+CREATE TRIGGER trg_dispatch_runs_checkpoint_fence_update
+BEFORE UPDATE ON dispatch_runs
+WHEN EXISTS (SELECT 1 FROM task_checkpoints c WHERE c.state != 'FINALIZED')
+BEGIN
+  SELECT RAISE(ABORT, 'CHECKPOINT_FINALIZATION_REQUIRED task=' || c.task_id || ' checkpoint=' || c.id || ' state=' || c.state)
+  FROM task_checkpoints c WHERE c.state != 'FINALIZED' LIMIT 1;
+END;
+
+CREATE TRIGGER trg_tasks_review_source_insert
+BEFORE INSERT ON tasks
+WHEN NEW.source_checkpoint_id IS NOT NULL OR NEW.source_task_id IS NOT NULL
+  OR NEW.source_task_revision IS NOT NULL OR NEW.source_checkpoint_commit IS NOT NULL
+  OR NEW.source_checkpoint_ref IS NOT NULL OR NEW.source_prior_base_commit IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'REVIEW_CHECKPOINT_BINDING_MISMATCH')
+  WHERE NEW.type != 'DIAGNOSIS' OR NOT EXISTS (
+    SELECT 1 FROM task_checkpoints c
+    WHERE c.id = NEW.source_checkpoint_id AND c.state = 'FINALIZED' AND c.purpose = 'REVIEW'
+      AND c.task_id = NEW.source_task_id AND c.producer_revision = NEW.source_task_revision
+      AND c.checkpoint_commit = NEW.source_checkpoint_commit AND c.checkpoint_ref = NEW.source_checkpoint_ref
+      AND c.prior_base_commit = NEW.source_prior_base_commit
+      AND NEW.base_commit = c.checkpoint_commit AND NEW.repo_root = c.repo_root AND NEW.branch = c.branch
+  );
+END;
+
+CREATE TRIGGER trg_tasks_review_source_update
+BEFORE UPDATE ON tasks
+WHEN NEW.source_checkpoint_id IS NOT OLD.source_checkpoint_id
+  OR NEW.source_task_id IS NOT OLD.source_task_id
+  OR NEW.source_task_revision IS NOT OLD.source_task_revision
+  OR NEW.source_checkpoint_commit IS NOT OLD.source_checkpoint_commit
+  OR NEW.source_checkpoint_ref IS NOT OLD.source_checkpoint_ref
+  OR NEW.source_prior_base_commit IS NOT OLD.source_prior_base_commit
+BEGIN
+  SELECT RAISE(ABORT, 'REVIEW_CHECKPOINT_BINDING_MISMATCH');
 END;
 `;
 
@@ -184,6 +323,12 @@ type TaskRow = {
   repo_root: string;
   base_commit: string;
   branch: string;
+  source_checkpoint_id: string | null;
+  source_task_id: string | null;
+  source_task_revision: number | null;
+  source_checkpoint_commit: string | null;
+  source_checkpoint_ref: string | null;
+  source_prior_base_commit: string | null;
   payload_json: string;
   result_json: string | null;
   blocker_json: string | null;
@@ -222,6 +367,25 @@ type DispatchRow = {
   error_detail: string | null;
   created_at: string;
   updated_at: string;
+};
+
+type CheckpointRow = {
+  id: string;
+  task_id: string;
+  producer_revision: number;
+  purpose: string;
+  state: string;
+  request_identity: string;
+  repo_root: string;
+  prior_base_commit: string;
+  expected_tree: string;
+  scope_identity: string;
+  checkpoint_commit: string | null;
+  checkpoint_ref: string;
+  branch: string;
+  changed_files_json: string;
+  created_at: string;
+  finalized_at: string | null;
 };
 
 export type NewTaskEvent = {
@@ -270,6 +434,17 @@ function rowToTask(row: TaskRow): TaskContract {
     repo_root: row.repo_root,
     base_commit: row.base_commit,
     branch: row.branch,
+    source_checkpoint:
+      row.source_checkpoint_id === null
+        ? null
+        : {
+            checkpoint_id: row.source_checkpoint_id,
+            producer_task_id: row.source_task_id,
+            producer_revision: row.source_task_revision,
+            checkpoint_commit: row.source_checkpoint_commit,
+            checkpoint_ref: row.source_checkpoint_ref,
+            prior_base_commit: row.source_prior_base_commit,
+          },
     payload,
     result: resultRaw === null ? null : taskResultSchema.parse(resultRaw),
     blocker: blockerRaw === null ? null : blockerSchema.parse(blockerRaw),
@@ -313,6 +488,91 @@ function rowToDispatch(row: DispatchRow): DispatchRun {
   };
 }
 
+function rowToCheckpointIntent(row: CheckpointRow): CheckpointIntent {
+  return {
+    id: row.id,
+    task_id: row.task_id,
+    producer_revision: row.producer_revision,
+    purpose: checkpointPurposeSchema.parse(row.purpose),
+    state: checkpointStateSchema.parse(row.state),
+    request_identity: row.request_identity,
+    repo_root: row.repo_root,
+    prior_base_commit: row.prior_base_commit,
+    expected_tree: row.expected_tree,
+    scope_identity: row.scope_identity,
+    checkpoint_commit: row.checkpoint_commit,
+    checkpoint_ref: row.checkpoint_ref,
+    branch: row.branch,
+    changed_files: JSON.parse(row.changed_files_json) as string[],
+    created_at: row.created_at,
+    finalized_at: row.finalized_at,
+  };
+}
+
+function finalizedCheckpoint(intent: CheckpointIntent): TaskCheckpoint {
+  return taskCheckpointSchema.parse(intent);
+}
+
+function createCheckpointTable(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_checkpoints (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(id),
+      producer_revision INTEGER NOT NULL,
+      purpose TEXT NOT NULL,
+      state TEXT NOT NULL,
+      request_identity TEXT NOT NULL UNIQUE,
+      repo_root TEXT NOT NULL,
+      prior_base_commit TEXT NOT NULL,
+      expected_tree TEXT NOT NULL,
+      scope_identity TEXT NOT NULL,
+      checkpoint_commit TEXT UNIQUE,
+      checkpoint_ref TEXT NOT NULL UNIQUE,
+      branch TEXT NOT NULL,
+      changed_files_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      finalized_at TEXT,
+      UNIQUE (task_id, producer_revision),
+      CHECK (purpose IN ('RESUME','REVIEW')),
+      CHECK (state IN ('PREPARED','GIT_APPLIED','FINALIZING','FINALIZED')),
+      CHECK ((state IN ('PREPARED','GIT_APPLIED') AND checkpoint_commit IS NULL AND finalized_at IS NULL)
+          OR (state = 'FINALIZING' AND checkpoint_commit IS NOT NULL AND finalized_at IS NULL)
+          OR (state = 'FINALIZED' AND checkpoint_commit IS NOT NULL AND finalized_at IS NOT NULL)),
+      CHECK (producer_revision >= 1)
+    ) STRICT;
+    CREATE UNIQUE INDEX IF NOT EXISTS one_unfinished_checkpoint
+    ON task_checkpoints((1))
+    WHERE state != 'FINALIZED';
+  `);
+}
+
+function rebuildTaskEventsForV8(db: DatabaseSync): void {
+  db.exec('DROP TRIGGER IF EXISTS trg_task_events_writer_protocol_insert');
+  db.exec(`
+    ALTER TABLE task_events RENAME TO task_events_pre_v8;
+    CREATE TABLE task_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT NOT NULL REFERENCES tasks(id),
+      at TEXT NOT NULL,
+      actor_role TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      from_status TEXT,
+      to_status TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      detail_json TEXT,
+      writer_generation INTEGER NOT NULL DEFAULT 1,
+      CHECK (actor_role IN ('OWNER','JUNIOR','PRINCIPAL')),
+      CHECK (kind IN ('created','claimed','result','blocked','resumed','cancelled','closed','checkpointed'))
+    ) STRICT;
+    INSERT INTO task_events (
+      id, task_id, at, actor_role, kind, from_status, to_status, revision, detail_json, writer_generation
+    )
+    SELECT id, task_id, at, actor_role, kind, from_status, to_status, revision, detail_json, writer_generation
+    FROM task_events_pre_v8;
+    DROP TABLE task_events_pre_v8;
+  `);
+}
+
 function applyConnectionPragmas(db: DatabaseSync): void {
   db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
   const currentJournal = String(pragmaValue(db, 'journal_mode')).toLowerCase();
@@ -333,7 +593,17 @@ const REQUIRED_FENCING_TRIGGERS = [
   'trg_task_events_writer_protocol_insert',
   'trg_dispatch_runs_writer_protocol_insert',
   'trg_dispatch_runs_writer_protocol_update',
+  'trg_tasks_checkpoint_fence_insert',
+  'trg_tasks_checkpoint_fence_update',
+  'trg_dispatch_runs_checkpoint_fence_insert',
+  'trg_dispatch_runs_checkpoint_fence_update',
+  'trg_task_checkpoints_exclusive_insert',
+  'trg_task_checkpoints_single_unfinished_insert',
+  'trg_tasks_review_source_insert',
+  'trg_tasks_review_source_update',
 ] as const;
+
+const REQUIRED_FENCING_INDEXES = ['one_unfinished_checkpoint'] as const;
 
 function triggerExists(db: DatabaseSync, name: string): boolean {
   const row = db
@@ -388,7 +658,7 @@ function createAllFencingTriggers(db: DatabaseSync): void {
     BEGIN
       SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
       WHERE NEW.writer_generation IS NULL
-         OR NEW.writer_generation != 2;
+     OR NEW.writer_generation != ${WRITER_PROTOCOL_GENERATION};
     END;
 
     CREATE TRIGGER IF NOT EXISTS trg_tasks_writer_protocol_update
@@ -396,7 +666,7 @@ function createAllFencingTriggers(db: DatabaseSync): void {
     BEGIN
       SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
       WHERE NEW.writer_generation IS NULL
-         OR NEW.writer_generation != OLD.writer_generation + 2;
+     OR NEW.writer_generation != OLD.writer_generation + ${WRITER_PROTOCOL_GENERATION};
     END;
 
     CREATE TRIGGER IF NOT EXISTS trg_task_events_writer_protocol_insert
@@ -404,7 +674,7 @@ function createAllFencingTriggers(db: DatabaseSync): void {
     BEGIN
       SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
       WHERE NEW.writer_generation IS NULL
-         OR NEW.writer_generation != 2;
+     OR NEW.writer_generation != ${WRITER_PROTOCOL_GENERATION};
     END;
 
     CREATE TRIGGER IF NOT EXISTS trg_dispatch_runs_writer_protocol_insert
@@ -412,7 +682,7 @@ function createAllFencingTriggers(db: DatabaseSync): void {
     BEGIN
       SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
       WHERE NEW.writer_generation IS NULL
-         OR NEW.writer_generation != 2;
+     OR NEW.writer_generation != ${WRITER_PROTOCOL_GENERATION};
     END;
 
     CREATE TRIGGER IF NOT EXISTS trg_dispatch_runs_writer_protocol_update
@@ -420,9 +690,113 @@ function createAllFencingTriggers(db: DatabaseSync): void {
     BEGIN
       SELECT RAISE(ABORT, 'CURRENT_PROTOCOL_WRITER_REQUIRED')
       WHERE NEW.writer_generation IS NULL
-         OR NEW.writer_generation != OLD.writer_generation + 2;
+     OR NEW.writer_generation != OLD.writer_generation + ${WRITER_PROTOCOL_GENERATION};
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tasks_checkpoint_fence_update
+    BEFORE UPDATE ON tasks
+    WHEN EXISTS (SELECT 1 FROM task_checkpoints c WHERE c.state != 'FINALIZED')
+    BEGIN
+      SELECT RAISE(ABORT, 'CHECKPOINT_FINALIZATION_REQUIRED task=' || c.task_id || ' checkpoint=' || c.id || ' state=' || c.state)
+      FROM task_checkpoints c
+      WHERE c.state != 'FINALIZED' AND NOT EXISTS (
+        SELECT 1 FROM task_checkpoints c
+        WHERE c.task_id = OLD.id AND c.state = 'FINALIZING'
+          AND OLD.revision = c.producer_revision AND NEW.revision = c.producer_revision + 1
+          AND NEW.base_commit = c.checkpoint_commit AND NEW.status = OLD.status
+          AND NEW.assignee_role IS OLD.assignee_role
+          AND NEW.execution_instance_id IS OLD.execution_instance_id
+          AND NEW.type = OLD.type AND NEW.owner_role = OLD.owner_role
+          AND NEW.repo_root = OLD.repo_root AND NEW.branch = OLD.branch
+          AND NEW.payload_json = OLD.payload_json
+          AND NEW.result_json IS OLD.result_json AND NEW.blocker_json IS OLD.blocker_json
+          AND NEW.source_checkpoint_id IS OLD.source_checkpoint_id
+          AND NEW.source_task_id IS OLD.source_task_id
+          AND NEW.source_task_revision IS OLD.source_task_revision
+          AND NEW.source_checkpoint_commit IS OLD.source_checkpoint_commit
+          AND NEW.source_checkpoint_ref IS OLD.source_checkpoint_ref
+          AND NEW.source_prior_base_commit IS OLD.source_prior_base_commit
+          AND NEW.created_at = OLD.created_at
+      ) LIMIT 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tasks_checkpoint_fence_insert
+    BEFORE INSERT ON tasks
+    WHEN EXISTS (SELECT 1 FROM task_checkpoints c WHERE c.state != 'FINALIZED')
+    BEGIN
+      SELECT RAISE(ABORT, 'CHECKPOINT_FINALIZATION_REQUIRED task=' || c.task_id || ' checkpoint=' || c.id || ' state=' || c.state)
+      FROM task_checkpoints c WHERE c.state != 'FINALIZED' LIMIT 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_dispatch_runs_checkpoint_fence_insert
+    BEFORE INSERT ON dispatch_runs
+    WHEN EXISTS (SELECT 1 FROM task_checkpoints c WHERE c.state != 'FINALIZED')
+    BEGIN
+      SELECT RAISE(ABORT, 'CHECKPOINT_FINALIZATION_REQUIRED task=' || c.task_id || ' checkpoint=' || c.id || ' state=' || c.state)
+      FROM task_checkpoints c WHERE c.state != 'FINALIZED' LIMIT 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_dispatch_runs_checkpoint_fence_update
+    BEFORE UPDATE ON dispatch_runs
+    WHEN EXISTS (SELECT 1 FROM task_checkpoints c WHERE c.state != 'FINALIZED')
+    BEGIN
+      SELECT RAISE(ABORT, 'CHECKPOINT_FINALIZATION_REQUIRED task=' || c.task_id || ' checkpoint=' || c.id || ' state=' || c.state)
+      FROM task_checkpoints c WHERE c.state != 'FINALIZED' LIMIT 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_task_checkpoints_exclusive_insert
+    BEFORE INSERT ON task_checkpoints
+    BEGIN
+      SELECT RAISE(ABORT, 'TASK_ALREADY_RUNNING task=' || t.id)
+      FROM tasks t WHERE t.status = 'RUNNING' LIMIT 1;
+      SELECT RAISE(ABORT, 'CHECKPOINT_ACTIVE_DISPATCH dispatch=' || d.id || ' task=' || d.task_id)
+      FROM dispatch_runs d WHERE d.status IN ('launching','running') LIMIT 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_task_checkpoints_single_unfinished_insert
+    BEFORE INSERT ON task_checkpoints
+    WHEN NEW.state != 'FINALIZED'
+    BEGIN
+      SELECT RAISE(ABORT, 'CHECKPOINT_FINALIZATION_REQUIRED task=' || c.task_id || ' checkpoint=' || c.id || ' state=' || c.state)
+      FROM task_checkpoints c WHERE c.state != 'FINALIZED' LIMIT 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tasks_review_source_insert
+    BEFORE INSERT ON tasks
+    WHEN NEW.source_checkpoint_id IS NOT NULL OR NEW.source_task_id IS NOT NULL
+      OR NEW.source_task_revision IS NOT NULL OR NEW.source_checkpoint_commit IS NOT NULL
+      OR NEW.source_checkpoint_ref IS NOT NULL OR NEW.source_prior_base_commit IS NOT NULL
+    BEGIN
+      SELECT RAISE(ABORT, 'REVIEW_CHECKPOINT_BINDING_MISMATCH')
+      WHERE NEW.type != 'DIAGNOSIS' OR NOT EXISTS (
+        SELECT 1 FROM task_checkpoints c
+        WHERE c.id = NEW.source_checkpoint_id AND c.state = 'FINALIZED' AND c.purpose = 'REVIEW'
+          AND c.task_id = NEW.source_task_id AND c.producer_revision = NEW.source_task_revision
+          AND c.checkpoint_commit = NEW.source_checkpoint_commit AND c.checkpoint_ref = NEW.source_checkpoint_ref
+          AND c.prior_base_commit = NEW.source_prior_base_commit
+          AND NEW.base_commit = c.checkpoint_commit AND NEW.repo_root = c.repo_root AND NEW.branch = c.branch
+      );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tasks_review_source_update
+    BEFORE UPDATE ON tasks
+    WHEN NEW.source_checkpoint_id IS NOT OLD.source_checkpoint_id
+      OR NEW.source_task_id IS NOT OLD.source_task_id
+      OR NEW.source_task_revision IS NOT OLD.source_task_revision
+      OR NEW.source_checkpoint_commit IS NOT OLD.source_checkpoint_commit
+      OR NEW.source_checkpoint_ref IS NOT OLD.source_checkpoint_ref
+      OR NEW.source_prior_base_commit IS NOT OLD.source_prior_base_commit
+    BEGIN
+      SELECT RAISE(ABORT, 'REVIEW_CHECKPOINT_BINDING_MISMATCH');
     END;
   `);
+}
+
+function indexExists(db: DatabaseSync, name: string): boolean {
+  const row = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`)
+    .get(name) as { name: string } | undefined;
+  return row !== undefined;
 }
 
 function validateExecutionInvariantRows(db: DatabaseSync): void {
@@ -496,6 +870,15 @@ function validateFencingObjects(db: DatabaseSync): void {
       );
     }
   }
+  for (const name of REQUIRED_FENCING_INDEXES) {
+    if (!indexExists(db, name)) {
+      throw new DomainError(
+        'SCHEMA_FENCING_MISSING',
+        `Required checkpoint fencing index ${name} is missing`,
+        { index: name },
+      );
+    }
+  }
 }
 
 function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
@@ -512,7 +895,15 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
         requireRepositoryBinding(db, repoRoot);
       }
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-    } else if (userVersion === 1 || userVersion === 2 || userVersion === 3 || userVersion === 4 || userVersion === 5 || userVersion === 6) {
+    } else if (
+      userVersion === 1 ||
+      userVersion === 2 ||
+      userVersion === 3 ||
+      userVersion === 4 ||
+      userVersion === 5 ||
+      userVersion === 6 ||
+      userVersion === 7
+    ) {
       if (userVersion === 1) {
         const running = db
           .prepare(`SELECT COUNT(*) AS count FROM tasks WHERE status = 'RUNNING'`)
@@ -596,13 +987,22 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
       if (!columnExists(db, 'tasks', 'writer_generation')) {
         db.exec('ALTER TABLE tasks ADD COLUMN writer_generation INTEGER');
       }
+      if (!columnExists(db, 'tasks', 'source_checkpoint_id')) {
+        db.exec('ALTER TABLE tasks ADD COLUMN source_checkpoint_id TEXT');
+        db.exec('ALTER TABLE tasks ADD COLUMN source_task_id TEXT');
+        db.exec('ALTER TABLE tasks ADD COLUMN source_task_revision INTEGER');
+        db.exec('ALTER TABLE tasks ADD COLUMN source_checkpoint_commit TEXT');
+        db.exec('ALTER TABLE tasks ADD COLUMN source_checkpoint_ref TEXT');
+        db.exec('ALTER TABLE tasks ADD COLUMN source_prior_base_commit TEXT');
+      }
+      createCheckpointTable(db);
       db.exec(`UPDATE tasks SET writer_generation = 1 WHERE writer_generation IS NULL`);
 
       validateExecutionInvariantRows(db);
       validateTaskRepositoryRoots(db);
       validateWriterGenerationRows(db);
-      // Replace pre-V7 writer triggers so a pre-opened V6 writer cannot keep
-      // using the +1 mutation protocol after migration to V7.
+      rebuildTaskEventsForV8(db);
+      // Reinstall the current writer fences after rebuilding task_events.
       db.exec('DROP TRIGGER IF EXISTS trg_tasks_writer_protocol_insert');
       db.exec('DROP TRIGGER IF EXISTS trg_tasks_writer_protocol_update');
       db.exec('DROP TRIGGER IF EXISTS trg_task_events_writer_protocol_insert');
@@ -663,12 +1063,18 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
     (
       db
         .prepare(
-          `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tasks', 'task_events', 'ledger_metadata', 'dispatch_runs')`,
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tasks', 'task_events', 'ledger_metadata', 'dispatch_runs', 'task_checkpoints')`,
         )
         .all() as Array<{ name: string }>
     ).map((row) => row.name),
   );
-  if (!names.has('tasks') || !names.has('task_events') || !names.has('ledger_metadata') || !names.has('dispatch_runs')) {
+  if (
+    !names.has('tasks') ||
+    !names.has('task_events') ||
+    !names.has('ledger_metadata') ||
+    !names.has('dispatch_runs') ||
+    !names.has('task_checkpoints')
+  ) {
     throw new DomainError('SCHEMA_MISMATCH', 'Required tables are missing');
   }
   validateFencingObjects(db);
@@ -783,10 +1189,11 @@ export class Store {
     this.db.close();
   }
 
-  transact<T>(fn: () => T): T {
+  transact<T>(fn: () => T, beforeCommit?: () => void): T {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = fn();
+      beforeCommit?.();
       this.db.exec('COMMIT');
       return result;
     } catch (error) {
@@ -843,9 +1250,10 @@ export class Store {
       .prepare(
         `INSERT INTO tasks (
           id, type, status, owner_role, assignee_role, execution_instance_id,
-          writer_generation, repo_root, base_commit, branch, payload_json, result_json,
-          blocker_json, revision, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          writer_generation, repo_root, base_commit, branch, source_checkpoint_id,
+          source_task_id, source_task_revision, source_checkpoint_commit, source_checkpoint_ref,
+          source_prior_base_commit, payload_json, result_json, blocker_json, revision, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         task.id,
@@ -858,6 +1266,12 @@ export class Store {
         task.repo_root,
         task.base_commit,
         task.branch,
+        task.source_checkpoint?.checkpoint_id ?? null,
+        task.source_checkpoint?.producer_task_id ?? null,
+        task.source_checkpoint?.producer_revision ?? null,
+        task.source_checkpoint?.checkpoint_commit ?? null,
+        task.source_checkpoint?.checkpoint_ref ?? null,
+        task.source_checkpoint?.prior_base_commit ?? null,
         JSON.stringify(task.payload),
         task.result === null ? null : JSON.stringify(task.result),
         task.blocker === null ? null : JSON.stringify(task.blocker),
@@ -873,7 +1287,9 @@ export class Store {
         `UPDATE tasks SET
           type = ?, status = ?, owner_role = ?, assignee_role = ?, execution_instance_id = ?,
           writer_generation = ?, repo_root = ?, base_commit = ?, branch = ?, payload_json = ?,
-          result_json = ?, blocker_json = ?, revision = ?, created_at = ?, updated_at = ?
+          result_json = ?, blocker_json = ?, revision = ?, created_at = ?, updated_at = ?,
+          source_checkpoint_id = ?, source_task_id = ?, source_task_revision = ?,
+          source_checkpoint_commit = ?, source_checkpoint_ref = ?, source_prior_base_commit = ?
          WHERE id = ?`,
       )
       .run(
@@ -892,6 +1308,12 @@ export class Store {
         task.revision,
         task.created_at,
         task.updated_at,
+        task.source_checkpoint?.checkpoint_id ?? null,
+        task.source_checkpoint?.producer_task_id ?? null,
+        task.source_checkpoint?.producer_revision ?? null,
+        task.source_checkpoint?.checkpoint_commit ?? null,
+        task.source_checkpoint?.checkpoint_ref ?? null,
+        task.source_checkpoint?.prior_base_commit ?? null,
         task.id,
       );
     if (result.changes !== 1) {
@@ -904,7 +1326,7 @@ export class Store {
       .prepare(
         `INSERT INTO task_events (
           task_id, at, actor_role, kind, from_status, to_status, revision, detail_json, writer_generation
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 2)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${WRITER_PROTOCOL_GENERATION})`,
       )
       .run(
         event.task_id,
@@ -925,13 +1347,91 @@ export class Store {
     return rows.map(rowToEvent);
   }
 
+  insertCheckpointIntent(checkpoint: CheckpointIntent): void {
+    this.db
+      .prepare(
+        `INSERT INTO task_checkpoints (
+          id, task_id, producer_revision, purpose, state, request_identity, repo_root,
+          prior_base_commit, expected_tree, scope_identity, checkpoint_commit,
+          checkpoint_ref, branch, changed_files_json, created_at, finalized_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        checkpoint.id,
+        checkpoint.task_id,
+        checkpoint.producer_revision,
+        checkpoint.purpose,
+        checkpoint.state,
+        checkpoint.request_identity,
+        checkpoint.repo_root,
+        checkpoint.prior_base_commit,
+        checkpoint.expected_tree,
+        checkpoint.scope_identity,
+        checkpoint.checkpoint_commit,
+        checkpoint.checkpoint_ref,
+        checkpoint.branch,
+        JSON.stringify(checkpoint.changed_files),
+        checkpoint.created_at,
+        checkpoint.finalized_at,
+      );
+  }
+
+  getCheckpointForRevision(taskId: string, producerRevision: number): CheckpointIntent | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM task_checkpoints
+         WHERE task_id = ? AND producer_revision = ?`,
+      )
+      .get(taskId, producerRevision) as CheckpointRow | undefined;
+    return row ? rowToCheckpointIntent(row) : undefined;
+  }
+
+  getCheckpointById(id: string): CheckpointIntent | undefined {
+    const row = this.db.prepare(`SELECT * FROM task_checkpoints WHERE id = ?`).get(id) as CheckpointRow | undefined;
+    return row ? rowToCheckpointIntent(row) : undefined;
+  }
+
+  getUnfinalizedCheckpoint(taskId: string): CheckpointIntent | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM task_checkpoints WHERE task_id = ? AND state != 'FINALIZED' LIMIT 1`)
+      .get(taskId) as CheckpointRow | undefined;
+    return row ? rowToCheckpointIntent(row) : undefined;
+  }
+
+  getAnyUnfinalizedCheckpoint(): CheckpointIntent | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM task_checkpoints WHERE state != 'FINALIZED' ORDER BY created_at ASC, rowid ASC LIMIT 1`)
+      .get() as CheckpointRow | undefined;
+    return row ? rowToCheckpointIntent(row) : undefined;
+  }
+
+  setCheckpointState(id: string, state: CheckpointIntent['state'], checkpointCommit?: string, finalizedAt?: string): void {
+    const result = this.db
+      .prepare(
+        `UPDATE task_checkpoints SET state = ?, checkpoint_commit = COALESCE(?, checkpoint_commit),
+         finalized_at = ? WHERE id = ?`,
+      )
+      .run(state, checkpointCommit ?? null, finalizedAt ?? null, id);
+    if (result.changes !== 1) throw new DomainError('TASK_NOT_FOUND', `Checkpoint ${id} was not updated`);
+  }
+
+  listCheckpoints(taskId: string): TaskCheckpoint[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM task_checkpoints
+         WHERE task_id = ? AND state = 'FINALIZED' ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all(taskId) as CheckpointRow[];
+    return rows.map((row) => finalizedCheckpoint(rowToCheckpointIntent(row)));
+  }
+
   insertDispatchRun(run: DispatchRun): void {
     this.db
       .prepare(
         `INSERT INTO dispatch_runs (
           id, task_id, worker_role, adapter_id, worker_profile_id, writer_generation, runner_instance_id, pid, status,
           started_at, finished_at, exit_code, error_code, error_detail, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 2, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ${WRITER_PROTOCOL_GENERATION}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.id,
@@ -958,7 +1458,7 @@ export class Store {
         `UPDATE dispatch_runs SET
           worker_role = ?, adapter_id = ?, worker_profile_id = ?, runner_instance_id = ?, pid = ?, status = ?,
           started_at = ?, finished_at = ?, exit_code = ?, error_code = ?, error_detail = ?,
-          writer_generation = writer_generation + 2,
+          writer_generation = writer_generation + ${WRITER_PROTOCOL_GENERATION},
           updated_at = ?
          WHERE id = ?`,
       )
@@ -985,7 +1485,7 @@ export class Store {
       .prepare(
         `UPDATE dispatch_runs
          SET status = 'failed', finished_at = ?, error_code = ?, error_detail = ?,
-             writer_generation = writer_generation + 2, updated_at = ?
+             writer_generation = writer_generation + ${WRITER_PROTOCOL_GENERATION}, updated_at = ?
          WHERE task_id = ? AND status IN ('launching','running')`,
       )
       .run(timestamp, errorCode, errorDetail, timestamp, taskId);
@@ -1006,6 +1506,17 @@ export class Store {
          ORDER BY created_at ASC LIMIT 1`,
       )
       .get(taskId) as DispatchRow | undefined;
+    return row ? rowToDispatch(row) : undefined;
+  }
+
+  getActiveDispatch(): DispatchRun | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM dispatch_runs
+         WHERE status IN ('launching','running')
+         ORDER BY created_at ASC, rowid ASC LIMIT 1`,
+      )
+      .get() as DispatchRow | undefined;
     return row ? rowToDispatch(row) : undefined;
   }
 

@@ -59,12 +59,21 @@ A terminal EWP result must be a JSON object with:
 - `outcome: "completed" | "blocked"`
 - `summary: string`
 - `changed_files: string[]`
-- `validation: [{ command: string, status: "passed"|"failed"|"not_run", summary?: string }]`
+- `validation: [{ command: string, status: "passed"|"failed"|"not_run", summary?: string, counts?: object }]`
 - `known_limitations: string[]`
 - optional `blocked_reason: string`
+- optional `blocker_classification: "CODE"|"TEST_FAILURE"|"VALIDATION_ENVIRONMENT"|"PERMISSION"|"TOOL_FAILURE"|"EXTERNAL_DEPENDENCY"|"SCOPE_CONFLICT"|"PLAN_CONFLICT"|"DECISION_REQUIRED"|"CONTEXT_STALE"|"REPOSITORY_DIVERGED"|"OTHER"`
+- optional `implementation_complete: boolean`
+- optional `git` evidence (`head`, `branch`, `working_tree_status`, and/or `diff_check`)
+- optional `environment` evidence (`cwd`, `platform`, `runtime`, `head`, and/or `branch`)
 - `exit_code: number`
 
 The authoritative result schema is `src/adapters/ewp.ts` (`ewpResultSchema`). The public example below is schema-valid.
+
+Worker-provided fields remain explicitly worker-reported. The Runner separately records its
+observed HEAD, branch, worktree, changed-file and scope evidence, while the server records task,
+repository, revision and role facts. Runner/server invariant failures override a conflicting
+worker blocker classification.
 
 Example result shape:
 
@@ -73,14 +82,20 @@ Example result shape:
   "protocol": "engineering-worker/1",
   "outcome": "completed",
   "summary": "Implemented the requested feature",
+  "implementation_complete": true,
   "changed_files": ["src/feature/index.ts"],
   "validation": [
     {
       "command": "npm test",
       "status": "passed",
-      "summary": "Tests passed"
+      "summary": "Tests passed",
+      "counts": { "passed": 24, "failed": 0, "total": 24 }
     }
   ],
+  "git": {
+    "diff_check": { "command": "git diff --check", "status": "passed" }
+  },
+  "environment": { "cwd": "/repo", "platform": "linux", "runtime": "node" },
   "known_limitations": [],
   "exit_code": 0
 }

@@ -26,7 +26,8 @@ function sampleTask(overrides: Partial<TaskContract> = {}): TaskContract {
     owner_role: 'OWNER',
     assignee_role: null,
     execution_instance_id: null,
-    writer_generation: 2,
+    writer_generation: 3,
+    source_checkpoint: null,
     repo_root: 'C:\\repo',
     base_commit: 'aaa',
     branch: 'master',
@@ -117,7 +118,7 @@ describe('Store', () => {
     expect(opened.store.getTask(task.id)?.status).toBe('READY');
   });
 
-  it('current V7 dispatch and event mutations advance internal writer_generation', () => {
+  it('current V8 dispatch and event mutations advance internal writer_generation', () => {
     const opened = openTempStore('C:\\repo');
     stores.push(opened.store);
     dirs.push(opened.dir);
@@ -160,8 +161,8 @@ describe('Store', () => {
     const dispatch = raw.prepare(`SELECT writer_generation FROM dispatch_runs WHERE id = ?`).get(run.id) as { writer_generation: number };
     const event = raw.prepare(`SELECT writer_generation FROM task_events WHERE task_id = ?`).get(task.id) as { writer_generation: number };
     raw.close();
-    expect(dispatch.writer_generation).toBe(6);
-    expect(event.writer_generation).toBe(2);
+    expect(dispatch.writer_generation).toBe(9);
+    expect(event.writer_generation).toBe(3);
   });
 
   it('rolls back a failed transaction atomically', () => {
@@ -544,7 +545,7 @@ describe('Store', () => {
         ...task,
         status: 'COMPLETED',
         execution_instance_id: 'current-owner',
-        writer_generation: task.writer_generation + 2,
+        writer_generation: task.writer_generation + 3,
         revision: 2,
       }),
     ).toThrow(/EXECUTION_STATE_INVARIANT_VIOLATION/);
@@ -564,7 +565,7 @@ describe('Store', () => {
       status: 'RUNNING' as const,
       assignee_role: 'JUNIOR' as const,
       execution_instance_id: 'current-owner',
-      writer_generation: ready.writer_generation + 2,
+      writer_generation: ready.writer_generation + 3,
       revision: 2,
     };
     opened.store.updateTask(running);
@@ -575,7 +576,7 @@ describe('Store', () => {
       ...running,
       status: 'COMPLETED' as const,
       execution_instance_id: null,
-      writer_generation: running.writer_generation + 2,
+      writer_generation: running.writer_generation + 3,
       result: null,
       revision: 3,
     };
@@ -673,7 +674,7 @@ describe('Store', () => {
       opened.store.updateTask({
         ...task,
         repo_root: 'repo-b',
-        writer_generation: task.writer_generation + 2,
+        writer_generation: task.writer_generation + 3,
         revision: 2,
       }),
     ).toThrow(/REPOSITORY_BINDING_MISMATCH/);
@@ -699,7 +700,7 @@ describe('Store', () => {
         ...task,
         assignee_role: 'PRINCIPAL',
         base_commit: 'changed',
-        writer_generation: task.writer_generation + 2,
+        writer_generation: task.writer_generation + 3,
         revision: 3,
       }),
     ).toThrow(/EXECUTION_STATE_INVARIANT_VIOLATION/);

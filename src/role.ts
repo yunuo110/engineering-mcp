@@ -8,12 +8,15 @@ export const OWNER_TOOLS = [
   'delegate_task',
   'await_delegation',
   'recover_task',
+  'checkpoint_task',
+  'create_diagnosis_from_checkpoint',
   'resume_task',
   'cancel_task',
   'close_task',
 ] as const;
 
 export const WORKER_TOOLS = [
+  'inspect_claimable_task',
   'claim_task',
   'claim_next_task',
   'get_task',

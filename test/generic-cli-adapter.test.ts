@@ -12,10 +12,11 @@ const task: TaskContract = {
   owner_role: 'OWNER',
   assignee_role: null,
   execution_instance_id: null,
-  writer_generation: 2,
+  writer_generation: 3,
   repo_root: 'C:\repo',
   base_commit: 'abc123',
   branch: 'main',
+  source_checkpoint: null,
   payload: {
     goal: 'Implement example',
     parent_intent: 'test',

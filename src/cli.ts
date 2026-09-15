@@ -157,7 +157,7 @@ async function inspectLedgerFile(ledgerPath: string): Promise<Record<string, unk
         .get() as { value?: string } | undefined;
       const tables = (
         db
-          .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tasks', 'task_events', 'ledger_metadata', 'dispatch_runs')`)
+          .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tasks', 'task_events', 'ledger_metadata', 'dispatch_runs', 'task_checkpoints')`)
           .all() as Array<{ name: string }>
       ).map((row) => row.name);
       const schemaCurrent = Number(userVersion) === SCHEMA_VERSION;

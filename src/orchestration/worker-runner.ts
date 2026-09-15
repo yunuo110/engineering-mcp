@@ -2,10 +2,11 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, lstatSync, openSync, readlinkSync, readSync } from 'node:fs';
 import { join } from 'node:path';
-import { inspectRepo } from '../git.ts';
+import { changedFilesFromRepo, inspectRepo } from '../git.ts';
 import { claimTask, reportBlocked, reportResult } from '../lifecycle.ts';
+import { isPathAllowedByScope } from '../scope.ts';
 import type { Store } from '../store.ts';
-import type { GitSnapshot, TaskContract } from '../types.ts';
+import type { GitSnapshot, RunnerObservedEvidence, TaskContract } from '../types.ts';
 import { workerResultSchema } from './types.ts';
 import type { WorkerAdapter, WorkerResult } from './types.ts';
 
@@ -18,26 +19,6 @@ export type RunnerInput = {
   dispatchRunId: string;
   adapter: WorkerAdapter;
 };
-
-function changedFilesFromRepo(repo: string): string[] {
-  const porcelain = execFileSync('git', ['-C', repo, 'status', '--porcelain=v1', '-z', '-uall'], {
-    encoding: 'utf8',
-    windowsHide: true,
-  });
-  const records = porcelain.split('\0');
-  const files: string[] = [];
-  for (let index = 0; index < records.length; index++) {
-    const record = records[index]!;
-    if (!record) continue;
-    files.push(record.slice(3));
-    // In -z mode a rename/copy has a second, unprefixed source path.
-    if (/[RC]/.test(record.slice(0, 2))) {
-      const source = records[++index];
-      if (source) files.push(source);
-    }
-  }
-  return [...new Set(files)];
-}
 
 function ignoredFileSnapshot(repo: string): Map<string, string> {
   // Git enumerates ignored leaves, including descendants of ignored directories.
@@ -80,19 +61,29 @@ function ignoredFileSnapshot(repo: string): Map<string, string> {
 function isAllowedFile(task: TaskContract, file: string): boolean {
   if (task.type !== 'IMPLEMENTATION') return false;
   const { allowed_scope, forbidden_scope } = task.payload as { allowed_scope: string[]; forbidden_scope: string[] };
-  const allowed = allowed_scope.some((scope: string) => file === scope || file.startsWith(`${scope}/`));
-  const forbidden = forbidden_scope.some((scope: string) => file === scope || file.startsWith(`${scope}/`));
-  return allowed && !forbidden;
+  return isPathAllowedByScope(file, allowed_scope, forbidden_scope);
 }
 
-function resultForWorker(task: TaskContract, result: WorkerResult, git: GitSnapshot) {
+function resultForWorker(task: TaskContract, result: WorkerResult, git: GitSnapshot, observedChangedFiles: string[]) {
   if (task.type !== 'IMPLEMENTATION') {
     throw new Error('WorkerRunner currently supports IMPLEMENTATION tasks only');
   }
   return {
     summary: result.summary,
-    changed_files: result.changed_files,
+    implementation_complete: result.implementation_complete,
+    changed_files: observedChangedFiles,
     validation: result.validation,
+    git: result.git,
+    environment: result.environment,
+    evidence: {
+      worker_reported: {
+        implementation_complete: result.implementation_complete,
+        changed_files: result.changed_files,
+        validation: result.validation,
+        git: result.git,
+        environment: result.environment,
+      },
+    },
     existing_tests_changed: [],
     scope_changes: [],
     unverified: result.known_limitations,
@@ -100,18 +91,49 @@ function resultForWorker(task: TaskContract, result: WorkerResult, git: GitSnaps
   };
 }
 
-function blockerForError(task: TaskContract, result: WorkerResult, errorCode: string) {
-  const reason =
+function blockerForError(result: WorkerResult, errorCode: string | null, git: GitSnapshot, observedChangedFiles: string[]) {
+  const authoritativeReason =
     errorCode === 'SCOPE_VIOLATION'
       ? 'SCOPE_CONFLICT'
       : errorCode === 'UNEXPECTED_HEAD_CHANGE'
         ? 'REPOSITORY_DIVERGED'
-        : 'OTHER';
+        : errorCode === 'WORKER_PROCESS_FAILED' || errorCode === 'WORKER_PROTOCOL_FAILURE'
+          ? 'TOOL_FAILURE'
+          : undefined;
+  const reason = authoritativeReason ?? result.blocker_classification ?? 'OTHER';
   return {
-    reason: reason as 'SCOPE_CONFLICT' | 'REPOSITORY_DIVERGED' | 'OTHER',
+    reason,
     summary: result.summary || `Worker blocked: ${errorCode}`,
     need_from_owner: 'Inspect worker output and repository state before resuming.',
     evidence_refs: [],
+    implementation_complete: result.implementation_complete,
+    changed_files: observedChangedFiles,
+    validation: result.validation,
+    git: result.git,
+    environment: result.environment,
+    evidence: {
+      worker_reported: {
+        implementation_complete: result.implementation_complete,
+        changed_files: result.changed_files,
+        validation: result.validation,
+        git: result.git,
+        environment: result.environment,
+        blocker_classification: result.blocker_classification,
+      },
+    },
+  };
+}
+
+function runnerObserved(git: GitSnapshot, changedFiles: string[], task: TaskContract): RunnerObservedEvidence {
+  const rejected = changedFiles.filter((file) => !isAllowedFile(task, file)).sort();
+  return {
+    changed_files: [...changedFiles].sort(),
+    git: {
+      head: git.head,
+      branch: git.branch,
+      working_tree_status: { clean: git.clean, porcelain: git.porcelain },
+    },
+    scope: { status: rejected.length === 0 ? 'passed' : 'failed', rejected_files: rejected },
   };
 }
 
@@ -192,17 +214,8 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
         exit_code: workerResult.exit_code ?? 1,
       };
     }
-  }
-
-  if (workerResult && workerResult.outcome === 'blocked' && errorCode === null) {
-    const reason = workerResult.blocked_reason;
-    if (
-      reason === 'WORKER_PROCESS_FAILED' ||
-      reason === 'WORKER_PROTOCOL_FAILURE' ||
-      reason === 'SCOPE_VIOLATION' ||
-      reason === 'UNEXPECTED_HEAD_CHANGE'
-    ) {
-      errorCode = reason;
+    if (workerResult.runner_error_code) {
+      errorCode = workerResult.runner_error_code;
     }
   }
 
@@ -215,9 +228,8 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
     }
   }
   const changedFiles = [...changed];
-  if (workerResult) workerResult.changed_files = changedFiles;
 
-  if (workerResult && workerResult.outcome === 'completed') {
+  if (workerResult) {
     if (repoAfter.head !== claimed.base_commit) {
       errorCode = 'UNEXPECTED_HEAD_CHANGE';
       workerResult.outcome = 'blocked';
@@ -253,13 +265,14 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
     updated_at: timestamp,
   };
   let terminal: TaskContract;
+  const observed = runnerObserved(repoAfter, changedFiles, claimed);
   if (workerResult && workerResult.outcome === 'completed' && errorCode === null) {
     terminal = reportResult(input.store, 'JUNIOR', input.executionInstanceId, {
       task_id: claimed.id,
       revision: claimed.revision,
       outcome: 'completed',
-      result: resultForWorker(claimed, workerResult, repoAfter),
-    }, { ...dispatchResult, status: 'completed' });
+      result: resultForWorker(claimed, workerResult, repoAfter, changedFiles),
+    }, { ...dispatchResult, status: 'completed' }, observed);
   } else {
     const result = workerResult ?? {
       outcome: 'blocked' as const,
@@ -273,8 +286,8 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
     terminal = reportBlocked(input.store, 'JUNIOR', input.executionInstanceId, {
       task_id: claimed.id,
       revision: claimed.revision,
-      blocker: blockerForError(claimed, result, errorCode ?? 'WORKER_PROTOCOL_FAILURE'),
-    }, { ...dispatchResult, status: 'blocked' });
+      blocker: blockerForError(result, errorCode ?? (workerResult ? null : 'WORKER_PROTOCOL_FAILURE'), repoAfter, changedFiles),
+    }, { ...dispatchResult, status: 'blocked' }, observed);
   }
 
   return terminal;

@@ -3,11 +3,14 @@ import { inspectRepo } from './git.ts';
 import { isDomainError } from './errors.ts';
 import {
   cancelTask,
+  checkpointTask,
   claimNextTask,
   claimTask,
   closeTask,
+  createDiagnosisFromCheckpoint,
   createTask,
   getTask,
+  inspectClaimableTask,
   listActiveTasks,
   recoverTask,
   reportBlocked,
@@ -21,13 +24,18 @@ import type { Store } from './store.ts';
 import {
   awaitDelegationInputSchema,
   cancelTaskInputSchema,
+  checkpointTaskInputSchema,
+  checkpointToolOutputSchema,
+  claimTicketToolOutputSchema,
   claimNextTaskInputSchema,
   claimTaskInputSchema,
   closeTaskInputSchema,
   createTaskInputSchema,
+  createDiagnosisFromCheckpointInputSchema,
   delegateTaskInputSchema,
   dispatchToolOutputSchema,
   getTaskInputSchema,
+  inspectClaimableTaskInputSchema,
   listActiveTasksInputSchema,
   listToolOutputSchema,
   listWorkerProfilesInputSchema,
@@ -38,9 +46,14 @@ import {
   reportResultInputSchema,
   resumeTaskInputSchema,
   taskToolOutputSchema,
+  transitionTaskToolOutputSchema,
   type GitSnapshot,
   type ProcessRole,
+  type DispatchRun,
   type TaskContract,
+  type TaskCheckpoint,
+  type TaskStatus,
+  type TransitionReceipt,
 } from './types.ts';
 
 export type ServerConfig = {
@@ -56,10 +69,55 @@ function taskText(prefix: string, task: TaskContract): string {
   return `${prefix} ${task.type} ${task.id} status=${task.status} rev=${task.revision} assignee=${assignee}`;
 }
 
-function okTask(prefix: string, task: TaskContract) {
+function transitionReceipt(
+  task: TaskContract,
+  previousStatus: TaskStatus | null,
+  options?: { dispatch?: DispatchRun; checkpoint?: TaskCheckpoint },
+): TransitionReceipt {
+  const dispatch = options?.dispatch;
+  return {
+    task_id: task.id,
+    type: task.type,
+    previous_status: previousStatus,
+    status: task.status,
+    revision: task.revision,
+    assignee_role: task.assignee_role,
+    repo_root: task.repo_root,
+    base_commit: task.base_commit,
+    branch: task.branch,
+    ...(dispatch
+      ? {
+          delegation: {
+            dispatch_run_id: dispatch.id,
+            worker_profile: dispatch.worker_profile_id,
+            worker_role: dispatch.worker_role,
+            adapter_id: dispatch.adapter_id,
+            state: dispatch.status,
+          },
+        }
+      : {}),
+    ...(options?.checkpoint ? { checkpoint: options.checkpoint } : {}),
+    ...(task.source_checkpoint ? { source_checkpoint: task.source_checkpoint } : {}),
+  };
+}
+
+function latestReceipt(
+  store: Store,
+  task: TaskContract,
+  options?: { dispatch?: DispatchRun; checkpoint?: TaskCheckpoint },
+): TransitionReceipt {
+  const events = store.listEvents(task.id);
+  const event = [...events].reverse().find((item) => item.revision === task.revision);
+  const previousStatus = options?.dispatch && event?.kind === 'created'
+    ? task.status
+    : (event?.from_status ?? null);
+  return transitionReceipt(task, previousStatus, options);
+}
+
+function okTask(prefix: string, task: TaskContract, receipt?: TransitionReceipt) {
   return {
     content: [{ type: 'text' as const, text: taskText(prefix, task) }],
-    structuredContent: { ok: true as const, task },
+    structuredContent: { ok: true as const, task, ...(receipt ? { receipt } : {}) },
   };
 }
 
@@ -96,14 +154,16 @@ function dispatchText(run: unknown, task: TaskContract, git?: GitSnapshot, still
     const result = task.result as {
       summary?: string;
       changed_files?: string[];
-      validation?: Array<{ check?: string; status?: string }>;
+      validation?: Array<{ check?: string; command?: string; status?: string }>;
       working_tree_status?: { clean?: boolean; porcelain?: string };
     };
     lines.push(`Outcome: completed`);
     if (result.summary) lines.push(`Summary: ${result.summary}`);
     if (result.changed_files?.length) lines.push(`Changed Files:\n${boundedList(result.changed_files)}`);
     const validation = result.validation ?? [];
-    lines.push(`Validation: ${validation.map((v) => `${v.check ?? '?'}=${v.status ?? '?'}`).join(', ') || 'none'}`);
+    lines.push(
+      `Validation: ${validation.map((v) => `${v.command ?? v.check ?? '?'}=${v.status ?? '?'}`).join(', ') || 'none'}`,
+    );
   }
   if (task.status === 'BLOCKED' && task.blocker) {
     lines.push(`Outcome: blocked`);
@@ -126,10 +186,22 @@ function dispatchText(run: unknown, task: TaskContract, git?: GitSnapshot, still
   return lines.join('\n');
 }
 
-function okDispatch(run: unknown, task: TaskContract, git?: GitSnapshot, stillRunning = false) {
+function okDispatch(
+  run: DispatchRun,
+  task: TaskContract,
+  receipt: TransitionReceipt,
+  git?: GitSnapshot,
+  stillRunning = false,
+) {
   return {
     content: [{ type: 'text' as const, text: dispatchText(run, task, git, stillRunning) }],
-    structuredContent: { ok: true as const, dispatch_run: run, task, ...(stillRunning ? { still_running: true } : {}) },
+    structuredContent: {
+      ok: true as const,
+      dispatch_run: run,
+      task,
+      receipt,
+      ...(stillRunning ? { still_running: true } : {}),
+    },
   };
 }
 
@@ -171,13 +243,64 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
         title: 'Create task',
         description: 'Create a READY implementation or diagnosis task from the current clean Git baseline.',
         inputSchema: createTaskInputSchema,
-        outputSchema: taskToolOutputSchema,
+        outputSchema: transitionTaskToolOutputSchema,
       },
       (args) => {
         try {
           const git = inspectRepo(config.repoPath);
           const task = createTask(config.store, git, args);
-          return okTask('Created', task);
+          return okTask('Created', task, latestReceipt(config.store, task));
+        } catch (error) {
+          return fail(error);
+        }
+      },
+    );
+  }
+
+  if (allowed.has('create_diagnosis_from_checkpoint')) {
+    server.registerTool(
+      'create_diagnosis_from_checkpoint',
+      {
+        title: 'Create diagnosis from REVIEW checkpoint',
+        description: 'Create a DIAGNOSIS task authoritatively bound to a finalized REVIEW checkpoint.',
+        inputSchema: createDiagnosisFromCheckpointInputSchema,
+        outputSchema: transitionTaskToolOutputSchema,
+      },
+      (args) => {
+        try {
+          const git = inspectRepo(config.repoPath);
+          const task = createDiagnosisFromCheckpoint(config.store, git, args);
+          return okTask('Created review', task, latestReceipt(config.store, task));
+        } catch (error) {
+          return fail(error);
+        }
+      },
+    );
+  }
+
+  if (allowed.has('inspect_claimable_task')) {
+    server.registerTool(
+      'inspect_claimable_task',
+      {
+        title: 'Inspect claimable task',
+        description:
+          'Read only the minimal claim ticket for a READY task permitted for this worker role.',
+        inputSchema: inspectClaimableTaskInputSchema,
+        outputSchema: claimTicketToolOutputSchema,
+      },
+      (args) => {
+        try {
+          const git = inspectRepo(config.repoPath);
+          const claimTicket = inspectClaimableTask(config.store, git, actor, args.task_id);
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Claim ticket ${claimTicket.type} ${claimTicket.task_id} rev=${claimTicket.revision}`,
+              },
+            ],
+            structuredContent: { ok: true as const, claim_ticket: claimTicket },
+          };
         } catch (error) {
           return fail(error);
         }
@@ -238,13 +361,13 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
         title: 'Claim task',
         description: 'Claim a READY task of this worker type. Returns the complete Task Contract.',
         inputSchema: claimTaskInputSchema,
-        outputSchema: taskToolOutputSchema,
+        outputSchema: transitionTaskToolOutputSchema,
       },
       (args) => {
         try {
           const git = inspectRepo(config.repoPath);
           const task = claimTask(config.store, git, actor, config.executionInstanceId, args.task_id, args.revision);
-          return okTask('Claimed', task);
+          return okTask('Claimed', task, latestReceipt(config.store, task));
         } catch (error) {
           return fail(error);
         }
@@ -260,13 +383,13 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
         description:
           'Atomically claim the oldest READY task of this worker type. Returns the complete Task Contract.',
         inputSchema: claimNextTaskInputSchema,
-        outputSchema: taskToolOutputSchema,
+        outputSchema: transitionTaskToolOutputSchema,
       },
       () => {
         try {
           const git = inspectRepo(config.repoPath);
           const task = claimNextTask(config.store, git, actor, config.executionInstanceId);
-          return okTask('Claimed', task);
+          return okTask('Claimed', task, latestReceipt(config.store, task));
         } catch (error) {
           return fail(error);
         }
@@ -281,12 +404,12 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
         title: 'Report result',
         description: 'Report COMPLETED or FAILED for the assigned RUNNING task.',
         inputSchema: reportResultInputSchema,
-        outputSchema: taskToolOutputSchema,
+        outputSchema: transitionTaskToolOutputSchema,
       },
       (args) => {
         try {
           const task = reportResult(config.store, actor, config.executionInstanceId, args);
-          return okTask('Reported', task);
+          return okTask('Reported', task, latestReceipt(config.store, task));
         } catch (error) {
           return fail(error);
         }
@@ -301,12 +424,12 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
         title: 'Report blocked',
         description: 'Report BLOCKED for the assigned RUNNING task and release the writer slot.',
         inputSchema: reportBlockedInputSchema,
-        outputSchema: taskToolOutputSchema,
+        outputSchema: transitionTaskToolOutputSchema,
       },
       (args) => {
         try {
           const task = reportBlocked(config.store, actor, config.executionInstanceId, args);
-          return okTask('Blocked', task);
+          return okTask('Blocked', task, latestReceipt(config.store, task));
         } catch (error) {
           return fail(error);
         }
@@ -340,7 +463,13 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
           if (!task) throw new Error('task disappeared during delegation');
           const postGit = inspectRepo(config.repoPath);
           const stillRunning = run.status === 'launching' || run.status === 'running';
-          return okDispatch(run, task, postGit, stillRunning);
+          return okDispatch(
+            run,
+            task,
+            latestReceipt(config.store, task, { dispatch: run }),
+            postGit,
+            stillRunning,
+          );
         } catch (error) {
           return fail(error);
         }
@@ -398,7 +527,13 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
           if (!task) throw new Error('task disappeared while awaiting delegation');
           const git = inspectRepo(config.repoPath);
           const stillRunning = run.status === 'launching' || run.status === 'running';
-          return okDispatch(run, task, git, stillRunning);
+          return okDispatch(
+            run,
+            task,
+            latestReceipt(config.store, task, { dispatch: run }),
+            git,
+            stillRunning,
+          );
         } catch (error) {
           return fail(error);
         }
@@ -414,13 +549,44 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
         description:
           'OWNER-only explicit recovery: move a RUNNING task to BLOCKED and clear its execution owner.',
         inputSchema: recoverTaskInputSchema,
-        outputSchema: taskToolOutputSchema,
+        outputSchema: transitionTaskToolOutputSchema,
       },
       (args) => {
         try {
           const git = inspectRepo(config.repoPath);
           const task = recoverTask(config.store, git, args);
-          return okTask('Recovered', task);
+          return okTask('Recovered', task, latestReceipt(config.store, task));
+        } catch (error) {
+          return fail(error);
+        }
+      },
+    );
+  }
+
+  if (allowed.has('checkpoint_task')) {
+    server.registerTool(
+      'checkpoint_task',
+      {
+        title: 'Checkpoint task output',
+        description:
+          'Record dirty implementation output as an immutable Git checkpoint before resume or review handoff.',
+        inputSchema: checkpointTaskInputSchema,
+        outputSchema: checkpointToolOutputSchema,
+      },
+      (args) => {
+        try {
+          const git = inspectRepo(config.repoPath);
+          const { task, checkpoint } = checkpointTask(config.store, git, args);
+          const receipt = latestReceipt(config.store, task, { checkpoint });
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `${taskText('Checkpointed', task)} checkpoint=${checkpoint.checkpoint_commit}`,
+              },
+            ],
+            structuredContent: { ok: true as const, task, checkpoint, receipt },
+          };
         } catch (error) {
           return fail(error);
         }
@@ -435,13 +601,13 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
         title: 'Resume task',
         description: 'Reopen a BLOCKED, FAILED, or COMPLETED task to READY with a fresh Git baseline.',
         inputSchema: resumeTaskInputSchema,
-        outputSchema: taskToolOutputSchema,
+        outputSchema: transitionTaskToolOutputSchema,
       },
       (args) => {
         try {
           const git = inspectRepo(config.repoPath);
           const task = resumeTask(config.store, git, args);
-          return okTask('Resumed', task);
+          return okTask('Resumed', task, latestReceipt(config.store, task));
         } catch (error) {
           return fail(error);
         }
@@ -456,12 +622,12 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
         title: 'Cancel task',
         description: 'Cancel a non-CLOSED task.',
         inputSchema: cancelTaskInputSchema,
-        outputSchema: taskToolOutputSchema,
+        outputSchema: transitionTaskToolOutputSchema,
       },
       (args) => {
         try {
           const task = cancelTask(config.store, args.task_id, args.revision, args.reason);
-          return okTask('Cancelled', task);
+          return okTask('Cancelled', task, latestReceipt(config.store, task));
         } catch (error) {
           return fail(error);
         }
@@ -476,12 +642,12 @@ export function registerRoleTools(server: McpServer, config: ServerConfig): void
         title: 'Close task',
         description: 'Owner integration decision: close COMPLETED, FAILED, or CANCELLED tasks.',
         inputSchema: closeTaskInputSchema,
-        outputSchema: taskToolOutputSchema,
+        outputSchema: transitionTaskToolOutputSchema,
       },
       (args) => {
         try {
           const task = closeTask(config.store, args.task_id, args.revision, args.decision);
-          return okTask('Closed', task);
+          return okTask('Closed', task, latestReceipt(config.store, task));
         } catch (error) {
           return fail(error);
         }

@@ -451,7 +451,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
         status: 'RUNNING' as const,
         assignee_role: 'JUNIOR' as const,
         execution_instance_id: 'v152-owner',
-        writer_generation: task.writer_generation + 2,
+        writer_generation: task.writer_generation + 3,
         revision: task.revision + 1,
       };
       current.updateTask(next);
@@ -498,7 +498,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
         ...task,
         status: 'COMPLETED' as const,
         execution_instance_id: null,
-        writer_generation: task.writer_generation + 2,
+        writer_generation: task.writer_generation + 3,
         result: implResult,
         revision: task.revision + 1,
       };
@@ -609,7 +609,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
         status: 'RUNNING' as const,
         assignee_role: 'JUNIOR' as const,
         execution_instance_id: 'v153-owner',
-        writer_generation: task.writer_generation + 2,
+        writer_generation: task.writer_generation + 3,
         revision: task.revision + 1,
       };
       current.updateTask(next);

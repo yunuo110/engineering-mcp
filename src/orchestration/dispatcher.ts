@@ -11,6 +11,7 @@ import type { WorkerAdapter } from './types.ts';
 import { runWorkerRunner } from './worker-runner.ts';
 import { resolveRuntimeEntry } from '../runtime-resolver.ts';
 import { dispatchRunDir } from '../dispatch-run-dir.ts';
+import { requireNoRepositoryCheckpoint } from '../lifecycle.ts';
 
 const WORKER_RUNNER_ENTRY = resolveRuntimeEntry(import.meta.url, {
   source: './worker-runner-entry.ts',
@@ -40,6 +41,7 @@ export async function delegateTask(
   expectedRevision: number,
   options: DelegateOptions,
 ): Promise<DispatchRun> {
+  requireNoRepositoryCheckpoint(store);
   const task = store.getTask(taskId);
   if (!task) throw new Error('task not found');
   if (task.status !== 'READY') {
@@ -78,6 +80,7 @@ export async function delegateTask(
   };
 
   store.transact(() => {
+    requireNoRepositoryCheckpoint(store);
     store.insertDispatchRun(run);
   });
 

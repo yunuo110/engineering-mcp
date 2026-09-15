@@ -62,10 +62,11 @@ export function promptWrapper(protocolMode: string, requestJson: string): string
     '  outcome: "completed" | "blocked"',
     '  summary: string',
     '  changed_files: string[]',
-    '  validation: [{ command: string, status: "passed"|"failed"|"not_run", summary?: string }]',
+    '  validation: [{ command: string, status: "passed"|"failed"|"not_run", summary?: string, counts?: object }]',
     '  known_limitations: string[]',
     '  blocked_reason?: string',
     '  exit_code: number',
+    'Optional evidence fields: implementation_complete, git, environment, blocker_classification.',
     '',
     'Completed example:',
     JSON.stringify({
@@ -206,6 +207,7 @@ export class GenericCliAdapter implements WorkerAdapter {
         known_limitations: [],
         blocked_reason: 'WORKER_PROCESS_FAILED',
         exit_code: exitCode ?? 1,
+        runner_error_code: 'WORKER_PROCESS_FAILED',
       };
     }
 
@@ -222,6 +224,7 @@ export class GenericCliAdapter implements WorkerAdapter {
       known_limitations: [],
       blocked_reason: 'WORKER_PROTOCOL_FAILURE',
       exit_code: exitCode ?? 1,
+      runner_error_code: 'WORKER_PROTOCOL_FAILURE',
     };
   }
 }

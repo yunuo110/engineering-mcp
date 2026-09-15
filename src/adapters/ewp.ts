@@ -1,5 +1,11 @@
 import { z } from 'zod/v4';
-import type { TaskContract } from '../types.ts';
+import {
+  blockerReasonSchema,
+  environmentEvidenceSchema,
+  gitEvidenceSchema,
+  validationCountsSchema,
+  type TaskContract,
+} from '../types.ts';
 import type { WorkerResult } from '../orchestration/types.ts';
 
 export const EWP_PROTOCOL = 'engineering-worker/1';
@@ -32,7 +38,8 @@ export type EwpRequest = z.infer<typeof ewpRequestSchema>;
 export const ewpValidationEntrySchema = z.object({
   command: z.string().min(1),
   status: z.enum(['passed', 'failed', 'not_run']),
-  summary: z.string().optional(),
+  summary: z.string().min(1).optional(),
+  counts: validationCountsSchema.optional(),
 });
 
 export const ewpResultSchema = z.object({
@@ -43,6 +50,10 @@ export const ewpResultSchema = z.object({
   validation: z.array(ewpValidationEntrySchema),
   known_limitations: z.array(z.string()),
   blocked_reason: z.string().optional(),
+  blocker_classification: blockerReasonSchema.optional(),
+  implementation_complete: z.boolean().optional(),
+  git: gitEvidenceSchema.optional(),
+  environment: environmentEvidenceSchema.optional(),
   exit_code: z.number().int().nonnegative(),
 }).strict();
 
@@ -97,10 +108,17 @@ export function ewpResultToWorkerResult(result: EwpResult): WorkerResult {
     changed_files: result.changed_files,
     validation: result.validation.map((entry) => ({
       check: entry.command,
+      command: entry.command,
       status: entry.status,
+      ...(entry.summary ? { summary: entry.summary } : {}),
+      ...(entry.counts ? { counts: entry.counts } : {}),
     })),
     known_limitations: result.known_limitations,
     blocked_reason: result.blocked_reason,
+    blocker_classification: result.blocker_classification,
+    implementation_complete: result.implementation_complete,
+    git: result.git,
+    environment: result.environment,
     exit_code: result.exit_code,
   };
 }
