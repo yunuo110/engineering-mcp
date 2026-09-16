@@ -97,6 +97,13 @@ export function git(repo: string, args: string[]): string {
   return execFileSync('git', ['-C', repo, ...args], {
     encoding: 'utf8',
     windowsHide: true,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Engineering MCP Tests',
+      GIT_AUTHOR_EMAIL: 'engineering-mcp-tests@example.invalid',
+      GIT_COMMITTER_NAME: 'Engineering MCP Tests',
+      GIT_COMMITTER_EMAIL: 'engineering-mcp-tests@example.invalid',
+    },
   }).trim();
 }
 
