@@ -1,8 +1,8 @@
 import { z } from 'zod/v4';
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 12;
 export const BUSY_TIMEOUT_MS = 5000;
-export const WRITER_PROTOCOL_GENERATION = 3;
+export const WRITER_PROTOCOL_GENERATION = 4;
 
 export const ROLES = ['OWNER', 'JUNIOR', 'PRINCIPAL'] as const;
 export type Role = (typeof ROLES)[number];

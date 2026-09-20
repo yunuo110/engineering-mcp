@@ -14,6 +14,7 @@ import {
   type CheckpointFailureStage,
 } from '../src/lifecycle.ts';
 import { Store } from '../src/store.ts';
+import { WRITER_PROTOCOL_GENERATION } from '../src/types.ts';
 import { git, implPayload, implResult, initGitRepo, openTempStore, removeDir, snapshot } from './helpers.ts';
 
 const dirs: string[] = [];
@@ -123,10 +124,10 @@ describe('recoverable checkpoint finalization protocol', () => {
       () => checkpointTask(fixture.store, snapshot(fixture.repo), { ...request, purpose: 'REVIEW' }),
     ]) expect(operation).toThrow(/checkpoint|Checkpoint/i);
 
-    expect(() => fixture.store.updateTask({ ...fixture.blocked, writer_generation: fixture.blocked.writer_generation + 3, status: 'CLOSED', revision: fixture.blocked.revision + 1 })).toThrow(/CHECKPOINT_FINALIZATION_REQUIRED/);
+    expect(() => fixture.store.updateTask({ ...fixture.blocked, writer_generation: fixture.blocked.writer_generation + WRITER_PROTOCOL_GENERATION, status: 'CLOSED', revision: fixture.blocked.revision + 1 })).toThrow(/CHECKPOINT_FINALIZATION_REQUIRED/);
     expect(() => fixture.store.updateTask({
       ...fixture.blocked,
-      writer_generation: fixture.blocked.writer_generation + 3,
+      writer_generation: fixture.blocked.writer_generation + WRITER_PROTOCOL_GENERATION,
       base_commit: fixture.store.getCheckpointForRevision(request.task_id, request.revision)!.checkpoint_commit ?? fixture.blocked.base_commit,
       revision: fixture.blocked.revision + 1,
       payload: { ...fixture.blocked.payload, goal: 'mutated during finalization' },

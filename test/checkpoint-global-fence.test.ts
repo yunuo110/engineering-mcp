@@ -21,7 +21,7 @@ import {
 } from '../src/lifecycle.ts';
 import { delegateTask } from '../src/orchestration/dispatcher.ts';
 import { Store } from '../src/store.ts';
-import type { CheckpointIntent, DispatchRun, TaskContract } from '../src/types.ts';
+import { WRITER_PROTOCOL_GENERATION, type CheckpointIntent, type DispatchRun, type TaskContract } from '../src/types.ts';
 import { diagnosisPayload, git, implPayload, implResult, initGitRepo, openTempStore, removeDir, snapshot } from './helpers.ts';
 
 const dirs: string[] = [];
@@ -167,7 +167,7 @@ function forceRunningAfterPending(store: Store, task: TaskContract, execution: s
   raw.exec('DROP TRIGGER trg_tasks_checkpoint_fence_update');
   raw.prepare(
     `UPDATE tasks SET status = 'RUNNING', assignee_role = 'JUNIOR', execution_instance_id = ?,
-     writer_generation = writer_generation + 3, revision = revision + 1, updated_at = ? WHERE id = ?`,
+     writer_generation = writer_generation + ${WRITER_PROTOCOL_GENERATION}, revision = revision + 1, updated_at = ? WHERE id = ?`,
   ).run(execution, new Date().toISOString(), task.id);
   raw.close();
   return store.getTask(task.id)!;
@@ -385,17 +385,17 @@ describe('repository-global unfinished checkpoint fence', () => {
        FROM tasks WHERE id = ?`,
     ).run(randomUUID(), other.id)).toThrow(fencePattern);
     expect(() => raw.prepare(
-      `UPDATE tasks SET status = 'CANCELLED', writer_generation = writer_generation + 3,
+      `UPDATE tasks SET status = 'CANCELLED', writer_generation = writer_generation + ${WRITER_PROTOCOL_GENERATION},
        revision = revision + 1, updated_at = ? WHERE id = ?`,
     ).run(new Date().toISOString(), other.id)).toThrow(fencePattern);
     expect(() => raw.prepare(
       `INSERT INTO dispatch_runs (
         id, task_id, worker_role, adapter_id, worker_profile_id, writer_generation, runner_instance_id, pid,
         status, started_at, finished_at, exit_code, error_code, error_detail, created_at, updated_at
-      ) VALUES (?, ?, 'JUNIOR', 'raw', NULL, 3, NULL, NULL, 'launching', NULL, NULL, NULL, NULL, NULL, ?, ?)`,
+      ) VALUES (?, ?, 'JUNIOR', 'raw', NULL, ${WRITER_PROTOCOL_GENERATION}, NULL, NULL, 'launching', NULL, NULL, NULL, NULL, NULL, ?, ?)`,
     ).run(randomUUID(), other.id, new Date().toISOString(), new Date().toISOString())).toThrow(fencePattern);
     expect(() => raw.prepare(
-      `UPDATE dispatch_runs SET status = 'running', writer_generation = writer_generation + 3, updated_at = ? WHERE id = ?`,
+      `UPDATE dispatch_runs SET status = 'running', writer_generation = writer_generation + ${WRITER_PROTOCOL_GENERATION}, updated_at = ? WHERE id = ?`,
     ).run(new Date().toISOString(), terminalDispatch.id)).toThrow(fencePattern);
     raw.close();
     expect(fixture.store.getTask(other.id)).toEqual(other);

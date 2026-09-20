@@ -616,6 +616,7 @@ These are scope boundaries, not implicit execution authority.
 - [Worker Profiles](docs/worker-profiles.md)
 - [Adapter Authoring](docs/adapter-authoring.md)
 - [Host Setup](docs/host-setup.md)
+- [Stable private C2C client contract](docs/c2c-private-contract.md)
 - [Threat Model](docs/threat-model.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)

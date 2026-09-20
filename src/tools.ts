@@ -1,4 +1,12 @@
 import type { McpServer } from '@modelcontextprotocol/server';
+import {
+  assertC2CControllerMode,
+  assertC2CPrivateClientMode,
+  executeC2CPlan,
+  executeC2CPlanInputSchema,
+  executeC2CPlanOutputSchema,
+} from './c2c/controller.ts';
+import { C2C_PRIVATE_OPERATION } from './c2c/schema.ts';
 import { inspectRepo } from './git.ts';
 import { isDomainError } from './errors.ts';
 import {
@@ -62,6 +70,9 @@ export type ServerConfig = {
   store: Store;
   executionInstanceId: string;
   workerProfiles: WorkerProfiles;
+  enableC2CController?: boolean;
+  c2cPrivateClient?: boolean;
+  c2cContractVersion?: string;
 };
 
 function taskText(prefix: string, task: TaskContract): string {
@@ -232,9 +243,41 @@ function fail(error: unknown) {
 }
 
 export function registerRoleTools(server: McpServer, config: ServerConfig): void {
+  assertC2CControllerMode(config.processRole, config.enableC2CController);
+  assertC2CPrivateClientMode(
+    config.processRole,
+    config.enableC2CController,
+    config.c2cPrivateClient,
+    config.c2cContractVersion,
+  );
   const allowed = new Set(toolsForProcessRole(config.processRole));
   const actor = processRoleToRole(config.processRole);
-  config.store.bindRepository(config.repoPath);
+  const controllerContext = config.enableC2CController === true ? Object.freeze({
+    processRole: config.processRole,
+    enableC2CController: true,
+    repoPath: inspectRepo(config.repoPath).repoRoot,
+    store: config.store,
+    workerProfiles: config.workerProfiles,
+  }) : undefined;
+  config.store.bindRepository(controllerContext?.repoPath ?? config.repoPath);
+
+  if (controllerContext) {
+    server.registerTool(C2C_PRIVATE_OPERATION, {
+      title: 'Execute an evaluated C2C PLAN',
+      description: 'Explicit OWNER command: evaluate PLAN, accept, create durable dispatch, and request controlled launch. Reuse all identities after response loss. Does not create or resume tasks; launch is not completion.',
+      inputSchema: executeC2CPlanInputSchema,
+      outputSchema: executeC2CPlanOutputSchema,
+    }, (args) => {
+      const result = executeC2CPlan(controllerContext, args);
+      return {
+        ...(result.ok ? {} : { isError: true }),
+        content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+        structuredContent: result,
+      };
+    });
+  }
+
+  if (config.c2cPrivateClient === true) return;
 
   if (allowed.has('create_task')) {
     server.registerTool(
