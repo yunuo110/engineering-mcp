@@ -68,12 +68,15 @@ engineering-mcp profiles --worker-profiles /absolute/path/to/profiles.yaml
 
 `configure` preview returns a self-contained, immutable consistency plan. Apply must
 consume that plan; it never silently prepares against changed source bytes. Safe Configure
-supports the native TOML used by Codex and Grok, explicitly pins the canonical
-Git repository, preserves unrelated settings, captures an existing file into a
-unique retained backup, and installs only with create-if-absent semantics. The plan
-is not an authorization credential; OS filesystem permissions authorize the write.
-On Windows, an existing file's Owner and DACL (including access-rule protection and
-inheritance state) are copied to and verified on the proposal before capture. Final
+supports the native TOML used by Codex and Grok and explicitly pins the canonical Git
+repository while preserving unrelated settings. Apply capability is platform-specific:
+Windows supports the full existing-config capture/recovery transaction; Linux and macOS
+support preview, semantic `NO_CHANGE`, and first-install create-if-absent when the local
+filesystem provides the required hard-link primitive, but an existing config that needs
+mutation fails early with `CONFIGURE_UNSUPPORTED` before transaction artifacts or target
+changes. The plan is not an authorization credential; OS filesystem permissions authorize
+the write. On Windows, an existing file's Owner and DACL (including access-rule protection
+and inheritance state) are copied to and verified on the proposal before capture. Final
 installation verifies the proposal's physical object, SHA-256, Owner, and DACL through
 one exclusive file handle and creates the target hard link from that same handle. This
 is a preservation and transactional-safety contract: Safe Configure does not itself
