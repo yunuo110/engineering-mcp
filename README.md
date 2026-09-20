@@ -28,6 +28,12 @@ Engineering MCP provides:
 
 Engineering truth remains in durable project state — the repository, Git history, tests, and Engineering MCP ledger — rather than depending on temporary conversation history.
 
+## Optional ChatGPT Companion
+
+Engineering MCP stays focused on the core engineering control plane. For an optional ChatGPT-facing companion with C2C forwarding, user-approved Workspace Access, and Private/OAuth deployment profiles, see [engineering-mcp-chatgpt](https://github.com/yunuo110/engineering-mcp-chatgpt).
+
+The companion uses the private [`engineering-c2c/1` contract](docs/c2c-private-contract.md) and is not required for normal Engineering MCP operation.
+
 ## Quick Start
 
 Requires Node.js 24 or newer and Git on PATH. The repository must have an initial
