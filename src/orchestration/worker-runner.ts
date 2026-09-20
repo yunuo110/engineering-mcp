@@ -97,7 +97,7 @@ function blockerForError(result: WorkerResult, errorCode: string | null, git: Gi
       ? 'SCOPE_CONFLICT'
       : errorCode === 'UNEXPECTED_HEAD_CHANGE'
         ? 'REPOSITORY_DIVERGED'
-        : errorCode === 'WORKER_PROCESS_FAILED' || errorCode === 'WORKER_PROTOCOL_FAILURE'
+        : errorCode === 'WORKER_PROCESS_FAILED' || errorCode === 'WORKER_PROTOCOL_FAILURE' || errorCode === 'CODEX_ARTIFACT_MISMATCH' || errorCode === 'CODEX_PROCESS_FAILED'
           ? 'TOOL_FAILURE'
           : undefined;
   const reason = authoritativeReason ?? result.blocker_classification ?? 'OTHER';
@@ -173,6 +173,13 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
       updated_at: new Date().toISOString(),
     },
   );
+  return await runClaimedWorkerExecution(input, claimed);
+}
+
+export async function runClaimedWorkerExecution(
+  input: RunnerInput,
+  claimed: TaskContract,
+): Promise<TaskContract> {
   // Snapshot after our claim transaction, so an ignored in-repository ledger
   // does not make the runner's own bookkeeping look like a worker mutation.
   const ignoredBefore = ignoredFileSnapshot(input.git.repoRoot);
@@ -184,7 +191,7 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
       dispatchRunId: input.dispatchRunId,
       taskId: input.taskId,
       repositoryRoot: input.git.repoRoot,
-      baseCommit: taskBefore.base_commit,
+      baseCommit: claimed.base_commit,
       task: claimed,
     });
   } catch (error) {

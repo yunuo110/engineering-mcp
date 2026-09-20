@@ -17,7 +17,7 @@ import {
 } from './helpers.ts';
 import { Store } from '../src/store.ts';
 import { DomainError } from '../src/errors.ts';
-import type { ProcessRole } from '../src/types.ts';
+import { WRITER_PROTOCOL_GENERATION, type ProcessRole } from '../src/types.ts';
 
 const LEGACY_COMMIT = '6b38cf4';
 const PREVIOUS_RELEASE_COMMIT = 'c41934e17f76e73b38b3817337119178de3154bc';
@@ -451,7 +451,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
         status: 'RUNNING' as const,
         assignee_role: 'JUNIOR' as const,
         execution_instance_id: 'v152-owner',
-        writer_generation: task.writer_generation + 3,
+        writer_generation: task.writer_generation + WRITER_PROTOCOL_GENERATION,
         revision: task.revision + 1,
       };
       current.updateTask(next);
@@ -498,7 +498,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
         ...task,
         status: 'COMPLETED' as const,
         execution_instance_id: null,
-        writer_generation: task.writer_generation + 3,
+        writer_generation: task.writer_generation + WRITER_PROTOCOL_GENERATION,
         result: implResult,
         revision: task.revision + 1,
       };
@@ -609,7 +609,7 @@ describe('V1.5.2 mixed-version legacy writer fencing', () => {
         status: 'RUNNING' as const,
         assignee_role: 'JUNIOR' as const,
         execution_instance_id: 'v153-owner',
-        writer_generation: task.writer_generation + 3,
+        writer_generation: task.writer_generation + WRITER_PROTOCOL_GENERATION,
         revision: task.revision + 1,
       };
       current.updateTask(next);

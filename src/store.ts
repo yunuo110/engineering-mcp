@@ -3,6 +3,22 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DomainError } from './errors.ts';
 import {
+  durableC2CEvaluationReceiptSchema,
+  type DurableC2CEvaluationReceipt,
+} from './receipts/schema.ts';
+import {
+  normalizedPlanAcceptanceRowSchema,
+  planAcceptanceReceiptSchema,
+  type NormalizedPlanAcceptanceRow,
+  type PlanAcceptanceReceipt,
+} from './commands/schema.ts';
+import {
+  c2cDelegationIntentReceiptSchema,
+  normalizedC2CDelegationReceiptRowSchema,
+  type C2CDelegationIntentReceipt,
+  type NormalizedC2CDelegationReceiptRow,
+} from './commands/delegation-schema.ts';
+import {
   BUSY_TIMEOUT_MS,
   SCHEMA_VERSION,
   WRITER_PROTOCOL_GENERATION,
@@ -125,6 +141,32 @@ CREATE TABLE task_checkpoints (
       OR (state = 'FINALIZING' AND checkpoint_commit IS NOT NULL AND finalized_at IS NULL)
       OR (state = 'FINALIZED' AND checkpoint_commit IS NOT NULL AND finalized_at IS NOT NULL)),
   CHECK (producer_revision >= 1)
+) STRICT;
+
+CREATE TABLE c2c_evaluation_receipts (
+  message_id TEXT PRIMARY KEY,
+  message_digest TEXT NOT NULL,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  evaluated_revision INTEGER NOT NULL,
+  decision TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  CHECK (length(message_digest) = 64),
+  CHECK (evaluated_revision >= 1),
+  CHECK (decision IN ('REQUIRES_OWNER_ACTION','READY_FOR_REVIEW'))
+) STRICT;
+
+CREATE TABLE c2c_plan_acceptance_receipts (
+  command_id TEXT PRIMARY KEY,
+  evaluation_message_id TEXT NOT NULL UNIQUE REFERENCES c2c_evaluation_receipts(message_id),
+  accepted_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE c2c_delegation_receipts (
+  command_id TEXT PRIMARY KEY,
+  acceptance_command_id TEXT NOT NULL UNIQUE REFERENCES c2c_plan_acceptance_receipts(command_id),
+  dispatch_run_id TEXT NOT NULL UNIQUE REFERENCES dispatch_runs(id),
+  launch_spec_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
 ) STRICT;
 
 CREATE UNIQUE INDEX one_unfinished_checkpoint
@@ -388,6 +430,36 @@ type CheckpointRow = {
   finalized_at: string | null;
 };
 
+type C2CEvaluationReceiptRow = {
+  message_id: string;
+  message_digest: string;
+  task_id: string;
+  evaluated_revision: number;
+  decision: string;
+  created_at: string;
+};
+
+type PlanAcceptanceProjectionRow = {
+  command_id: string;
+  evaluation_message_id: string;
+  accepted_at: string;
+  task_id: string;
+  accepted_revision: number;
+};
+
+type C2CDelegationProjectionRow = {
+  command_id: string;
+  acceptance_command_id: string;
+  dispatch_run_id: string;
+  launch_spec_json: string;
+  created_at: string;
+  task_id: string;
+  accepted_revision: number;
+  worker_profile_id: string;
+  adapter_id: string;
+  dispatch_status: string;
+};
+
 export type NewTaskEvent = {
   task_id: string;
   at: string;
@@ -509,6 +581,48 @@ function rowToCheckpointIntent(row: CheckpointRow): CheckpointIntent {
   };
 }
 
+function rowToC2CEvaluationReceipt(
+  row: C2CEvaluationReceiptRow,
+): DurableC2CEvaluationReceipt {
+  return durableC2CEvaluationReceiptSchema.parse({
+    message_id: row.message_id,
+    message_digest: row.message_digest,
+    task_id: row.task_id,
+    evaluated_revision: row.evaluated_revision,
+    decision: row.decision,
+    created_at: row.created_at,
+  });
+}
+
+function rowToPlanAcceptanceReceipt(
+  row: PlanAcceptanceProjectionRow,
+): PlanAcceptanceReceipt {
+  return planAcceptanceReceiptSchema.parse({
+    command_id: row.command_id,
+    evaluation_message_id: row.evaluation_message_id,
+    task_id: row.task_id,
+    accepted_revision: row.accepted_revision,
+    accepted_at: row.accepted_at,
+  });
+}
+
+function rowToC2CDelegationIntentReceipt(
+  row: C2CDelegationProjectionRow,
+): C2CDelegationIntentReceipt {
+  return c2cDelegationIntentReceiptSchema.parse({
+    command_id: row.command_id,
+    acceptance_command_id: row.acceptance_command_id,
+    dispatch_run_id: row.dispatch_run_id,
+    task_id: row.task_id,
+    accepted_revision: row.accepted_revision,
+    worker_profile_id: row.worker_profile_id,
+    adapter_id: row.adapter_id,
+    dispatch_status: row.dispatch_status,
+    launch_spec: JSON.parse(row.launch_spec_json) as unknown,
+    created_at: row.created_at,
+  });
+}
+
 function finalizedCheckpoint(intent: CheckpointIntent): TaskCheckpoint {
   return taskCheckpointSchema.parse(intent);
 }
@@ -543,6 +657,44 @@ function createCheckpointTable(db: DatabaseSync): void {
     CREATE UNIQUE INDEX IF NOT EXISTS one_unfinished_checkpoint
     ON task_checkpoints((1))
     WHERE state != 'FINALIZED';
+  `);
+}
+
+function createC2CEvaluationReceiptTable(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS c2c_evaluation_receipts (
+      message_id TEXT PRIMARY KEY,
+      message_digest TEXT NOT NULL,
+      task_id TEXT NOT NULL REFERENCES tasks(id),
+      evaluated_revision INTEGER NOT NULL,
+      decision TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      CHECK (length(message_digest) = 64),
+      CHECK (evaluated_revision >= 1),
+      CHECK (decision IN ('REQUIRES_OWNER_ACTION','READY_FOR_REVIEW'))
+    ) STRICT;
+  `);
+}
+
+function createC2CPlanAcceptanceReceiptTable(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS c2c_plan_acceptance_receipts (
+      command_id TEXT PRIMARY KEY,
+      evaluation_message_id TEXT NOT NULL UNIQUE REFERENCES c2c_evaluation_receipts(message_id),
+      accepted_at TEXT NOT NULL
+    ) STRICT;
+  `);
+}
+
+function createC2CDelegationReceiptTable(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS c2c_delegation_receipts (
+      command_id TEXT PRIMARY KEY,
+      acceptance_command_id TEXT NOT NULL UNIQUE REFERENCES c2c_plan_acceptance_receipts(command_id),
+      dispatch_run_id TEXT NOT NULL UNIQUE REFERENCES dispatch_runs(id),
+      launch_spec_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    ) STRICT;
   `);
 }
 
@@ -792,6 +944,15 @@ function createAllFencingTriggers(db: DatabaseSync): void {
   `);
 }
 
+function reinstallCurrentWriterProtocolTriggers(db: DatabaseSync): void {
+  db.exec('DROP TRIGGER IF EXISTS trg_tasks_writer_protocol_insert');
+  db.exec('DROP TRIGGER IF EXISTS trg_tasks_writer_protocol_update');
+  db.exec('DROP TRIGGER IF EXISTS trg_task_events_writer_protocol_insert');
+  db.exec('DROP TRIGGER IF EXISTS trg_dispatch_runs_writer_protocol_insert');
+  db.exec('DROP TRIGGER IF EXISTS trg_dispatch_runs_writer_protocol_update');
+  createAllFencingTriggers(db);
+}
+
 function indexExists(db: DatabaseSync, name: string): boolean {
   const row = db
     .prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`)
@@ -878,6 +1039,124 @@ function validateFencingObjects(db: DatabaseSync): void {
         { index: name },
       );
     }
+  }
+}
+
+function validateC2CEvaluationReceiptStorage(db: DatabaseSync): void {
+  if (!tableExists(db, 'c2c_evaluation_receipts')) {
+    throw new DomainError(
+      'SCHEMA_MISMATCH',
+      'C2C evaluation receipt table is missing',
+    );
+  }
+
+  const columns = db
+    .prepare(`PRAGMA table_info(c2c_evaluation_receipts)`)
+    .all() as Array<{ name: string }>;
+  const names = columns.map((column) => column.name);
+  const expected = [
+    'message_id',
+    'message_digest',
+    'task_id',
+    'evaluated_revision',
+    'decision',
+    'created_at',
+  ];
+  if (
+    names.length !== expected.length ||
+    expected.some((name, index) => names[index] !== name)
+  ) {
+    throw new DomainError(
+      'SCHEMA_MISMATCH',
+      'C2C evaluation receipt table has an unexpected shape',
+      { actual_columns: names, expected_columns: expected },
+    );
+  }
+
+  const table = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'c2c_evaluation_receipts'`)
+    .get() as { sql: string } | undefined;
+  if (!table?.sql.toUpperCase().includes('STRICT')) {
+    throw new DomainError(
+      'SCHEMA_MISMATCH',
+      'C2C evaluation receipt table must be STRICT',
+    );
+  }
+}
+
+function validateC2CPlanAcceptanceStorage(db: DatabaseSync): void {
+  if (!tableExists(db, 'c2c_plan_acceptance_receipts')) {
+    throw new DomainError(
+      'SCHEMA_MISMATCH',
+      'C2C plan acceptance receipt table is missing',
+    );
+  }
+
+  const columns = db
+    .prepare(`PRAGMA table_info(c2c_plan_acceptance_receipts)`)
+    .all() as Array<{ name: string }>;
+  const names = columns.map((column) => column.name);
+  const expected = ['command_id', 'evaluation_message_id', 'accepted_at'];
+  if (
+    names.length !== expected.length ||
+    expected.some((name, index) => names[index] !== name)
+  ) {
+    throw new DomainError(
+      'SCHEMA_MISMATCH',
+      'C2C plan acceptance receipt table has an unexpected shape',
+      { actual_columns: names, expected_columns: expected },
+    );
+  }
+
+  const table = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'c2c_plan_acceptance_receipts'`)
+    .get() as { sql: string } | undefined;
+  if (!table?.sql.toUpperCase().includes('STRICT')) {
+    throw new DomainError(
+      'SCHEMA_MISMATCH',
+      'C2C plan acceptance receipt table must be STRICT',
+    );
+  }
+}
+
+function validateC2CDelegationStorage(db: DatabaseSync): void {
+  if (!tableExists(db, 'c2c_delegation_receipts')) {
+    throw new DomainError(
+      'SCHEMA_MISMATCH',
+      'C2C delegation receipt table is missing',
+    );
+  }
+
+  const columns = db
+    .prepare(`PRAGMA table_info(c2c_delegation_receipts)`)
+    .all() as Array<{ name: string }>;
+  const names = columns.map((column) => column.name);
+  const expected = [
+    'command_id',
+    'acceptance_command_id',
+    'dispatch_run_id',
+    'launch_spec_json',
+    'created_at',
+  ];
+  if (
+    names.length !== expected.length ||
+    expected.some((name, index) => names[index] !== name)
+  ) {
+    throw new DomainError(
+      'SCHEMA_MISMATCH',
+      'C2C delegation receipt table has an unexpected shape',
+      { actual_columns: names, expected_columns: expected },
+    );
+  }
+
+  const table = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'c2c_delegation_receipts'`)
+    .get() as { sql: string } | undefined;
+  if (!table?.sql.toUpperCase().includes('STRICT')) {
+    throw new DomainError(
+      'SCHEMA_MISMATCH',
+      'C2C delegation receipt table must be STRICT',
+    );
   }
 }
 
@@ -996,6 +1275,9 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
         db.exec('ALTER TABLE tasks ADD COLUMN source_prior_base_commit TEXT');
       }
       createCheckpointTable(db);
+      createC2CEvaluationReceiptTable(db);
+      createC2CPlanAcceptanceReceiptTable(db);
+      createC2CDelegationReceiptTable(db);
       db.exec(`UPDATE tasks SET writer_generation = 1 WHERE writer_generation IS NULL`);
 
       validateExecutionInvariantRows(db);
@@ -1009,6 +1291,90 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
       db.exec('DROP TRIGGER IF EXISTS trg_dispatch_runs_writer_protocol_insert');
       db.exec('DROP TRIGGER IF EXISTS trg_dispatch_runs_writer_protocol_update');
       createAllFencingTriggers(db);
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    } else if (userVersion === 8) {
+      if (repoRoot !== undefined) {
+        requireRepositoryBinding(db, repoRoot);
+      } else {
+        const metadata = db
+          .prepare(`SELECT value FROM ledger_metadata WHERE key = 'repository_root'`)
+          .get() as { value: string } | undefined;
+        if (!metadata) {
+          throw new DomainError(
+            'REPOSITORY_BINDING_MISMATCH',
+            'V8 ledger is missing repository binding metadata',
+          );
+        }
+      }
+      validateTaskRepositoryRoots(db);
+      validateWriterGenerationRows(db);
+      createC2CEvaluationReceiptTable(db);
+      createC2CPlanAcceptanceReceiptTable(db);
+      createC2CDelegationReceiptTable(db);
+      reinstallCurrentWriterProtocolTriggers(db);
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    } else if (userVersion === 9) {
+      if (repoRoot !== undefined) {
+        requireRepositoryBinding(db, repoRoot);
+      } else {
+        const metadata = db
+          .prepare(`SELECT value FROM ledger_metadata WHERE key = 'repository_root'`)
+          .get() as { value: string } | undefined;
+        if (!metadata) {
+          throw new DomainError(
+            'REPOSITORY_BINDING_MISMATCH',
+            'V9 ledger is missing repository binding metadata',
+          );
+        }
+      }
+      validateTaskRepositoryRoots(db);
+      validateWriterGenerationRows(db);
+      validateC2CEvaluationReceiptStorage(db);
+      createC2CPlanAcceptanceReceiptTable(db);
+      createC2CDelegationReceiptTable(db);
+      reinstallCurrentWriterProtocolTriggers(db);
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    } else if (userVersion === 10) {
+      if (repoRoot !== undefined) {
+        requireRepositoryBinding(db, repoRoot);
+      } else {
+        const metadata = db
+          .prepare(`SELECT value FROM ledger_metadata WHERE key = 'repository_root'`)
+          .get() as { value: string } | undefined;
+        if (!metadata) {
+          throw new DomainError(
+            'REPOSITORY_BINDING_MISMATCH',
+            'V10 ledger is missing repository binding metadata',
+          );
+        }
+      }
+      validateTaskRepositoryRoots(db);
+      validateWriterGenerationRows(db);
+      validateC2CEvaluationReceiptStorage(db);
+      validateC2CPlanAcceptanceStorage(db);
+      createC2CDelegationReceiptTable(db);
+      reinstallCurrentWriterProtocolTriggers(db);
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    } else if (userVersion === 11) {
+      if (repoRoot !== undefined) {
+        requireRepositoryBinding(db, repoRoot);
+      } else {
+        const metadata = db
+          .prepare(`SELECT value FROM ledger_metadata WHERE key = 'repository_root'`)
+          .get() as { value: string } | undefined;
+        if (!metadata) {
+          throw new DomainError(
+            'REPOSITORY_BINDING_MISMATCH',
+            'V11 ledger is missing repository binding metadata',
+          );
+        }
+      }
+      validateTaskRepositoryRoots(db);
+      validateWriterGenerationRows(db);
+      validateC2CEvaluationReceiptStorage(db);
+      validateC2CPlanAcceptanceStorage(db);
+      validateC2CDelegationStorage(db);
+      reinstallCurrentWriterProtocolTriggers(db);
       db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     } else if (userVersion === SCHEMA_VERSION) {
       if (repoRoot !== undefined) {
@@ -1034,6 +1400,9 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
       );
     }
 
+    validateC2CEvaluationReceiptStorage(db);
+    validateC2CPlanAcceptanceStorage(db);
+    validateC2CDelegationStorage(db);
     db.exec('COMMIT');
   } catch (error) {
     if (db.isTransaction) {
@@ -1063,7 +1432,7 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
     (
       db
         .prepare(
-          `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tasks', 'task_events', 'ledger_metadata', 'dispatch_runs', 'task_checkpoints')`,
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('tasks', 'task_events', 'ledger_metadata', 'dispatch_runs', 'task_checkpoints', 'c2c_evaluation_receipts', 'c2c_plan_acceptance_receipts', 'c2c_delegation_receipts')`,
         )
         .all() as Array<{ name: string }>
     ).map((row) => row.name),
@@ -1073,7 +1442,10 @@ function migrateAndValidate(db: DatabaseSync, repoRoot?: string): void {
     !names.has('task_events') ||
     !names.has('ledger_metadata') ||
     !names.has('dispatch_runs') ||
-    !names.has('task_checkpoints')
+    !names.has('task_checkpoints') ||
+    !names.has('c2c_evaluation_receipts') ||
+    !names.has('c2c_plan_acceptance_receipts') ||
+    !names.has('c2c_delegation_receipts')
   ) {
     throw new DomainError('SCHEMA_MISMATCH', 'Required tables are missing');
   }
@@ -1245,6 +1617,25 @@ export class Store {
     return row ? rowToTask(row) : undefined;
   }
 
+  getNextReadyUnreserved(type: TaskType): TaskContract | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT t.* FROM tasks t
+         WHERE t.status = 'READY' AND t.type = ?
+           AND NOT EXISTS (
+             SELECT 1
+             FROM c2c_delegation_receipts d
+             JOIN dispatch_runs r ON r.id = d.dispatch_run_id
+             WHERE r.task_id = t.id
+               AND r.status IN ('launching','running')
+           )
+         ORDER BY t.created_at ASC, t.rowid ASC
+         LIMIT 1`,
+      )
+      .get(type) as TaskRow | undefined;
+    return row ? rowToTask(row) : undefined;
+  }
+
   insertTask(task: TaskContract): void {
     this.db
       .prepare(
@@ -1345,6 +1736,187 @@ export class Store {
       .prepare(`SELECT * FROM task_events WHERE task_id = ? ORDER BY id ASC`)
       .all(taskId) as EventRow[];
     return rows.map(rowToEvent);
+  }
+
+  getC2CEvaluationReceipt(messageId: string): DurableC2CEvaluationReceipt | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM c2c_evaluation_receipts WHERE message_id = ?`)
+      .get(messageId) as C2CEvaluationReceiptRow | undefined;
+    return row ? rowToC2CEvaluationReceipt(row) : undefined;
+  }
+
+  insertC2CEvaluationReceipt(receipt: DurableC2CEvaluationReceipt): void {
+    const parsed = durableC2CEvaluationReceiptSchema.parse(receipt);
+    this.db
+      .prepare(
+        `INSERT INTO c2c_evaluation_receipts (
+          message_id, message_digest, task_id, evaluated_revision, decision, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        parsed.message_id,
+        parsed.message_digest,
+        parsed.task_id,
+        parsed.evaluated_revision,
+        parsed.decision,
+        parsed.created_at,
+      );
+  }
+
+  getPlanAcceptanceReceipt(commandId: string): PlanAcceptanceReceipt | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT a.command_id, a.evaluation_message_id, a.accepted_at,
+                e.task_id, e.evaluated_revision AS accepted_revision
+         FROM c2c_plan_acceptance_receipts a
+         JOIN c2c_evaluation_receipts e
+           ON e.message_id = a.evaluation_message_id
+         WHERE a.command_id = ?`,
+      )
+      .get(commandId) as PlanAcceptanceProjectionRow | undefined;
+    return row ? rowToPlanAcceptanceReceipt(row) : undefined;
+  }
+
+  getPlanAcceptanceForEvaluation(
+    evaluationMessageId: string,
+  ): PlanAcceptanceReceipt | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT a.command_id, a.evaluation_message_id, a.accepted_at,
+                e.task_id, e.evaluated_revision AS accepted_revision
+         FROM c2c_plan_acceptance_receipts a
+         JOIN c2c_evaluation_receipts e
+           ON e.message_id = a.evaluation_message_id
+         WHERE a.evaluation_message_id = ?`,
+      )
+      .get(evaluationMessageId) as PlanAcceptanceProjectionRow | undefined;
+    return row ? rowToPlanAcceptanceReceipt(row) : undefined;
+  }
+
+  insertPlanAcceptanceReceipt(row: NormalizedPlanAcceptanceRow): void {
+    const parsed = normalizedPlanAcceptanceRowSchema.parse(row);
+    this.db
+      .prepare(
+        `INSERT INTO c2c_plan_acceptance_receipts (
+          command_id, evaluation_message_id, accepted_at
+        ) VALUES (?, ?, ?)`,
+      )
+      .run(
+        parsed.command_id,
+        parsed.evaluation_message_id,
+        parsed.accepted_at,
+      );
+  }
+
+  getC2CDelegationIntentReceipt(
+    commandId: string,
+  ): C2CDelegationIntentReceipt | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT d.command_id, d.acceptance_command_id, d.dispatch_run_id,
+                d.launch_spec_json, d.created_at,
+                e.task_id, e.evaluated_revision AS accepted_revision,
+                r.worker_profile_id, r.adapter_id, r.status AS dispatch_status
+         FROM c2c_delegation_receipts d
+         JOIN c2c_plan_acceptance_receipts a
+           ON a.command_id = d.acceptance_command_id
+         JOIN c2c_evaluation_receipts e
+           ON e.message_id = a.evaluation_message_id
+         JOIN dispatch_runs r
+           ON r.id = d.dispatch_run_id
+         WHERE d.command_id = ?`,
+      )
+      .get(commandId) as C2CDelegationProjectionRow | undefined;
+    return row ? rowToC2CDelegationIntentReceipt(row) : undefined;
+  }
+
+  getC2CDelegationIntentForAcceptance(
+    acceptanceCommandId: string,
+  ): C2CDelegationIntentReceipt | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT d.command_id, d.acceptance_command_id, d.dispatch_run_id,
+                d.launch_spec_json, d.created_at,
+                e.task_id, e.evaluated_revision AS accepted_revision,
+                r.worker_profile_id, r.adapter_id, r.status AS dispatch_status
+         FROM c2c_delegation_receipts d
+         JOIN c2c_plan_acceptance_receipts a
+           ON a.command_id = d.acceptance_command_id
+         JOIN c2c_evaluation_receipts e
+           ON e.message_id = a.evaluation_message_id
+         JOIN dispatch_runs r
+           ON r.id = d.dispatch_run_id
+         WHERE d.acceptance_command_id = ?`,
+      )
+      .get(acceptanceCommandId) as C2CDelegationProjectionRow | undefined;
+    return row ? rowToC2CDelegationIntentReceipt(row) : undefined;
+  }
+
+  getC2CDelegationIntentForDispatch(
+    dispatchRunId: string,
+  ): C2CDelegationIntentReceipt | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT d.command_id, d.acceptance_command_id, d.dispatch_run_id,
+                d.launch_spec_json, d.created_at,
+                e.task_id, e.evaluated_revision AS accepted_revision,
+                r.worker_profile_id, r.adapter_id, r.status AS dispatch_status
+         FROM c2c_delegation_receipts d
+         JOIN c2c_plan_acceptance_receipts a
+           ON a.command_id = d.acceptance_command_id
+         JOIN c2c_evaluation_receipts e
+           ON e.message_id = a.evaluation_message_id
+         JOIN dispatch_runs r
+           ON r.id = d.dispatch_run_id
+         WHERE d.dispatch_run_id = ?`,
+      )
+      .get(dispatchRunId) as C2CDelegationProjectionRow | undefined;
+    return row ? rowToC2CDelegationIntentReceipt(row) : undefined;
+  }
+
+  getActiveC2CDelegationIntentForTask(
+    taskId: string,
+  ): C2CDelegationIntentReceipt | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT d.command_id, d.acceptance_command_id, d.dispatch_run_id,
+                d.launch_spec_json, d.created_at,
+                e.task_id, e.evaluated_revision AS accepted_revision,
+                r.worker_profile_id, r.adapter_id, r.status AS dispatch_status
+         FROM c2c_delegation_receipts d
+         JOIN c2c_plan_acceptance_receipts a
+           ON a.command_id = d.acceptance_command_id
+         JOIN c2c_evaluation_receipts e
+           ON e.message_id = a.evaluation_message_id
+         JOIN dispatch_runs r
+           ON r.id = d.dispatch_run_id
+         WHERE r.task_id = ?
+           AND r.status IN ('launching','running')
+         ORDER BY r.created_at ASC
+         LIMIT 1`,
+      )
+      .get(taskId) as C2CDelegationProjectionRow | undefined;
+    return row ? rowToC2CDelegationIntentReceipt(row) : undefined;
+  }
+
+  insertC2CDelegationIntentReceipt(
+    row: NormalizedC2CDelegationReceiptRow,
+  ): void {
+    const parsed = normalizedC2CDelegationReceiptRowSchema.parse(row);
+    this.db
+      .prepare(
+        `INSERT INTO c2c_delegation_receipts (
+          command_id, acceptance_command_id, dispatch_run_id,
+          launch_spec_json, created_at
+        ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        parsed.command_id,
+        parsed.acceptance_command_id,
+        parsed.dispatch_run_id,
+        JSON.stringify(parsed.launch_spec),
+        parsed.created_at,
+      );
   }
 
   insertCheckpointIntent(checkpoint: CheckpointIntent): void {

@@ -25,7 +25,11 @@ export type WorkerResult = {
   environment?: z.infer<typeof environmentEvidenceSchema>;
   exit_code: number;
   /** Trusted adapter observation. This field is not part of EWP and is never parsed from worker output. */
-  runner_error_code?: 'WORKER_PROCESS_FAILED' | 'WORKER_PROTOCOL_FAILURE';
+  runner_error_code?:
+    | 'WORKER_PROCESS_FAILED'
+    | 'WORKER_PROTOCOL_FAILURE'
+    | 'CODEX_ARTIFACT_MISMATCH'
+    | 'CODEX_PROCESS_FAILED';
 };
 
 export const workerResultSchema = z.object({

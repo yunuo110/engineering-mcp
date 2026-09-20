@@ -3,6 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { userInfo } from 'node:os';
+import { assertC2CControllerMode, assertC2CPrivateClientMode } from './c2c/controller.ts';
+import {
+  C2C_PRIVATE_OPERATION,
+  C2C_PRIVATE_TRANSPORT,
+} from './c2c/schema.ts';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { defaultLedgerPath } from './db-path.ts';
 import { DomainError } from './errors.ts';
@@ -24,7 +30,15 @@ function parseProcessRole(value: string | undefined): ProcessRole {
 }
 
 function main(): void {
-  let values: { role?: string; repo?: string; db?: string; 'worker-profiles'?: string };
+  let values: {
+    role?: string;
+    repo?: string;
+    db?: string;
+    'worker-profiles'?: string;
+    'enable-c2c-controller'?: boolean;
+    'c2c-private-client'?: boolean;
+    'c2c-contract-version'?: string;
+  };
   try {
     const parsed = parseArgs({
       options: {
@@ -32,6 +46,9 @@ function main(): void {
         repo: { type: 'string' },
         db: { type: 'string' },
         'worker-profiles': { type: 'string' },
+        'enable-c2c-controller': { type: 'boolean' },
+        'c2c-private-client': { type: 'boolean' },
+        'c2c-contract-version': { type: 'string' },
       },
       strict: true,
       allowPositionals: false,
@@ -43,6 +60,16 @@ function main(): void {
   }
 
   const processRole = parseProcessRole(values.role);
+  const enableC2CController = values['enable-c2c-controller'];
+  const c2cPrivateClient = values['c2c-private-client'];
+  const c2cContractVersion = values['c2c-contract-version'];
+  assertC2CControllerMode(processRole, enableC2CController);
+  assertC2CPrivateClientMode(
+    processRole,
+    enableC2CController,
+    c2cPrivateClient,
+    c2cContractVersion,
+  );
   if (!values.role) {
     throw new DomainError('USAGE', 'Launch with --role owner|junior|principal. Role is process identity.');
   }
@@ -68,14 +95,37 @@ function main(): void {
   process.stdin.on('end', closeStore);
 
   serveStdio(
-    () =>
-      createEngineeringServer({
+    () => {
+      const server = createEngineeringServer({
         processRole,
         repoPath,
         store,
         executionInstanceId,
         workerProfiles,
-      }),
+        enableC2CController,
+        c2cPrivateClient,
+        c2cContractVersion,
+      });
+      if (enableC2CController === true) {
+        let username: string | null = null;
+        try { username = userInfo().username; } catch { /* identity unavailable, no environment fallback */ }
+        console.error(JSON.stringify(c2cPrivateClient === true ? {
+          event: 'c2c_private_client_enabled',
+          pid: process.pid,
+          username,
+          role: 'OWNER',
+          repo_root: repoPath,
+          contract_version: c2cContractVersion,
+          transport: C2C_PRIVATE_TRANSPORT,
+          tool: C2C_PRIVATE_OPERATION,
+          tool_count: 1,
+        } : {
+          event: 'c2c_controller_enabled', pid: process.pid, username,
+          role: 'OWNER', repo_root: repoPath, tool: C2C_PRIVATE_OPERATION,
+        }));
+      }
+      return server;
+    },
     {
       onerror: (error) => {
         console.error(error);

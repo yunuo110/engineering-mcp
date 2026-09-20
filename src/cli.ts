@@ -3,6 +3,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { parseArgs } from 'node:util';
 import { ledgerPathFor } from './db-path.ts';
 import { inspectRepo } from './git.ts';
 import { resolveRepository } from './repository-resolver.ts';
@@ -17,6 +18,7 @@ import {
   prepareConfigure,
   type ConfigureHost,
 } from './configure.ts';
+import { C2C_PRIVATE_OPERATION, C2C_PRIVATE_TRANSPORT, C2C_PROTOCOL_VERSION } from './c2c/schema.ts';
 
 const VERSION = '0.1.1';
 const serverEntry = resolveRuntimeEntry(import.meta.url, {
@@ -34,6 +36,7 @@ Usage:
   engineering-mcp setup
   engineering-mcp configure --host codex|grok [--repo <path>] [--config <absolute-path>] [--command <executable>]
   engineering-mcp configure --apply --plan <preview-identity> [matching assertions]
+  engineering-mcp c2c-client --contract-version ${C2C_PROTOCOL_VERSION} --repo <path> [--db <path>] [--worker-profiles <path>]
   engineering-mcp doctor
   engineering-mcp profiles
   engineering-mcp adapter validate <manifest>
@@ -44,11 +47,13 @@ Commands:
   configure             Safely preview or explicitly apply a repository-pinned host entry
   doctor                Report local runtime, Git, ledger, and harness availability
   profiles              Print loaded worker profiles without invoking models
+  c2c-client            Start the versioned private ${C2C_PRIVATE_TRANSPORT} compatibility surface (${C2C_PRIVATE_OPERATION} only)
   adapter validate      Validate a GenericCliAdapter manifest only
   adapter probe         Locate the manifest command without invoking a model
 
 Options:
   --help                Show this help.
+  --enable-c2c-controller  Explicit OWNER-only C2C controller opt-in (never enabled by host configuration).
 `);
 }
 
@@ -59,6 +64,42 @@ function runServer(args: string[]): void {
     windowsHide: true,
   });
   child.on('close', (code) => process.exit(code ?? 1));
+}
+
+function runPrivateC2CClient(args: string[]): void {
+  for (const name of ['contract-version', 'repo', 'db', 'worker-profiles']) {
+    const count = args.filter((arg) => arg === `--${name}` || arg.startsWith(`--${name}=`)).length;
+    if (count > 1) throw new Error(`Duplicate --${name} is not allowed`);
+  }
+  const parsed = parseArgs({
+    args,
+    options: {
+      'contract-version': { type: 'string' },
+      repo: { type: 'string' },
+      db: { type: 'string' },
+      'worker-profiles': { type: 'string' },
+    },
+    strict: true,
+    allowPositionals: false,
+  });
+  if (parsed.values['contract-version'] !== C2C_PROTOCOL_VERSION) {
+    throw new Error(`--contract-version must be ${C2C_PROTOCOL_VERSION}`);
+  }
+  if (!parsed.values.repo) {
+    throw new Error('c2c-client requires an explicit --repo');
+  }
+  const serverArgs = [
+    '--role', 'owner',
+    '--repo', parsed.values.repo,
+    '--enable-c2c-controller',
+    '--c2c-private-client',
+    '--c2c-contract-version', C2C_PROTOCOL_VERSION,
+  ];
+  if (parsed.values.db) serverArgs.push('--db', parsed.values.db);
+  if (parsed.values['worker-profiles']) {
+    serverArgs.push('--worker-profiles', parsed.values['worker-profiles']);
+  }
+  runServer(serverArgs);
 }
 
 function optionValue(args: string[], name: string): string | undefined {
@@ -464,9 +505,15 @@ function adapterCommand(args: string[]): void {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
-  if (args.length === 0 || args.includes('--help') || args.includes('-h') || args[0] === 'help') {
-    printHelp();
-    return;
+  if (args.some((arg) => arg === '--enable-c2c-controller' || arg.startsWith('--enable-c2c-controller='))) {
+    // Do not silently ignore opt-in on a utility command or a non-OWNER role.
+    const roles = args.filter((arg) => arg === '--role' || arg.startsWith('--role='));
+    if (args.filter((arg) => arg === '--enable-c2c-controller').length !== 1 ||
+        args.some((arg) => arg.startsWith('--enable-c2c-controller=')) ||
+        roles.length !== 1 || !args.includes('--role') || optionValue(args, '--role') !== 'owner' ||
+        ['setup', 'configure', 'doctor', 'profiles', 'adapter', 'help'].includes(args[0] ?? '')) {
+      throw new Error('--enable-c2c-controller requires an explicit --role owner server launch');
+    }
   }
 
   if (args.length === 0 || args.includes('--help') || args.includes('-h') || args[0] === 'help') {
@@ -493,6 +540,10 @@ async function main(): Promise<void> {
   }
   if (cmd === 'profiles') {
     profilesCommand(rest);
+    return;
+  }
+  if (cmd === 'c2c-client') {
+    runPrivateC2CClient(rest);
     return;
   }
 
