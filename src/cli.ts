@@ -10,6 +10,13 @@ import { loadManifest, validateManifest } from './adapters/manifest.ts';
 import { SCHEMA_VERSION } from './types.ts';
 import { resolveRuntimeEntry } from './runtime-resolver.ts';
 import { builtinWorkerProfiles, listWorkerProfiles, loadWorkerProfiles } from './worker-profiles.ts';
+import {
+  applyConfigurePlanIdentity,
+  ConfigureError,
+  createConfigurePlanIdentity,
+  prepareConfigure,
+  type ConfigureHost,
+} from './configure.ts';
 
 const VERSION = '0.1.1';
 const serverEntry = resolveRuntimeEntry(import.meta.url, {
@@ -25,6 +32,8 @@ A safety-first control plane for native coding-agent harnesses.
 Usage:
   engineering-mcp --role owner|junior|principal [--repo <path>] [--db <path>] [--worker-profiles <path>]
   engineering-mcp setup
+  engineering-mcp configure --host codex|grok [--repo <path>] [--config <absolute-path>] [--command <executable>]
+  engineering-mcp configure --apply --plan <preview-identity> [matching assertions]
   engineering-mcp doctor
   engineering-mcp profiles
   engineering-mcp adapter validate <manifest>
@@ -32,6 +41,7 @@ Usage:
 
 Commands:
   setup                 Preview MCP host configuration snippets (no files written)
+  configure             Safely preview or explicitly apply a repository-pinned host entry
   doctor                Report local runtime, Git, ledger, and harness availability
   profiles              Print loaded worker profiles without invoking models
   adapter validate      Validate a GenericCliAdapter manifest only
@@ -138,7 +148,89 @@ Harness execution profiles; they do not let task text choose executables,
 models, providers, or credentials.
 
 Run "engineering-mcp doctor" to verify local prerequisites.
+
+For a repository-pinned, backup-protected host configuration, use:
+  engineering-mcp configure --host codex|grok --repo /absolute/path/to/repo
+Then apply the returned immutable identity with:
+  engineering-mcp configure --apply --plan <preview-identity>
 `);
+}
+
+function configureCommand(args: string[]): void {
+  const values = new Map<string, string>();
+  let apply = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index]!;
+    if (token === '--apply') {
+      if (apply) throw new ConfigureError('CONFIGURE_USAGE', '--apply may be specified only once');
+      apply = true;
+      continue;
+    }
+    if (!['--host', '--repo', '--config', '--command', '--plan'].includes(token)) {
+      throw new ConfigureError('CONFIGURE_USAGE', `Unknown configure option: ${token}`);
+    }
+    if (values.has(token)) {
+      throw new ConfigureError('CONFIGURE_USAGE', `${token} may be specified only once`);
+    }
+    const value = args[index + 1];
+    if (!value || value.startsWith('--')) {
+      throw new ConfigureError('CONFIGURE_USAGE', `${token} requires a value`);
+    }
+    values.set(token, value);
+    index += 1;
+  }
+
+  const host = values.get('--host');
+  if (host !== undefined && host !== 'codex' && host !== 'grok') {
+    throw new ConfigureError('CONFIGURE_USAGE', '--host must be exactly codex or grok');
+  }
+  if (apply) {
+    const identity = values.get('--plan');
+    if (!identity) {
+      throw new ConfigureError('CONFIGURE_PLAN_REQUIRED', '--apply requires the immutable --plan identity from preview');
+    }
+    console.log(
+      JSON.stringify(
+        applyConfigurePlanIdentity(identity, {
+          host: host as ConfigureHost | undefined,
+          repo: values.get('--repo') ?? process.env.ENGINEERING_MCP_REPO,
+          configPath: values.get('--config'),
+          command: values.get('--command'),
+          cwd: process.cwd(),
+        }),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  if (values.has('--plan')) {
+    throw new ConfigureError('CONFIGURE_USAGE', '--plan is consumed only together with --apply');
+  }
+  if (!host) throw new ConfigureError('CONFIGURE_USAGE', '--host must be exactly codex or grok');
+  const prepared = prepareConfigure({
+    host,
+    configPath: values.get('--config'),
+    repo: values.get('--repo'),
+    envRepo: process.env.ENGINEERING_MCP_REPO,
+    cwd: process.cwd(),
+    command: values.get('--command'),
+  });
+  const identity = createConfigurePlanIdentity(prepared);
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        mode: 'PREVIEW',
+        mutated: false,
+        plan_identity: identity.identity,
+        plan: identity.plan,
+        trust_model: identity.trust_model,
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 async function inspectLedgerFile(ledgerPath: string): Promise<Record<string, unknown>> {
@@ -377,14 +469,18 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (args.includes('--role')) {
-    runServer(args);
+  if (args.length === 0 || args.includes('--help') || args.includes('-h') || args[0] === 'help') {
+    printHelp();
     return;
   }
 
   const [cmd, ...rest] = args;
   if (cmd === 'setup') {
     setup();
+    return;
+  }
+  if (cmd === 'configure') {
+    configureCommand(rest);
     return;
   }
   if (cmd === 'doctor') {
@@ -400,11 +496,20 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args.includes('--role')) {
+    runServer(args);
+    return;
+  }
+
   console.error('Unknown command. Use engineering-mcp --help');
   process.exit(1);
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  if (error instanceof ConfigureError) {
+    console.error(JSON.stringify({ ok: false, error: { code: error.code, message: error.message, details: error.details } }, null, 2));
+  } else {
+    console.error(error instanceof Error ? error.message : String(error));
+  }
   process.exit(1);
 });

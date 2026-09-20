@@ -60,9 +60,35 @@ Useful commands:
 
 ```bash
 engineering-mcp setup
+engineering-mcp configure --host codex --repo /absolute/path/to/repository
+engineering-mcp configure --apply --plan <preview-identity>
 engineering-mcp doctor
 engineering-mcp profiles --worker-profiles /absolute/path/to/profiles.yaml
 ```
+
+`configure` preview returns a self-contained, immutable consistency plan. Apply must
+consume that plan; it never silently prepares against changed source bytes. Safe Configure
+supports the native TOML used by Codex and Grok, explicitly pins the canonical
+Git repository, preserves unrelated settings, captures an existing file into a
+unique retained backup, and installs only with create-if-absent semantics. The plan
+is not an authorization credential; OS filesystem permissions authorize the write.
+On Windows, an existing file's Owner and DACL (including access-rule protection and
+inheritance state) are copied to and verified on the proposal before capture. Final
+installation verifies the proposal's physical object, SHA-256, Owner, and DACL through
+one exclusive file handle and creates the target hard link from that same handle. This
+is a preservation and transactional-safety contract: Safe Configure does not itself
+broaden the source authorization and it protects ordinary path/content races, target
+recreation, same-plan concurrency, and crash/retry. Principals that already hold or can
+independently exercise `WRITE_DAC`, `WRITE_OWNER`, ownership authority, backup/restore
+privileges, or SYSTEM/elevated equivalent authority remain governed by Windows and are
+outside Safe Configure's isolation boundary. Post-install verification supplies
+detection and recovery evidence; it is not proof that such a principal could not make
+an unobserved transient security-descriptor change between observations. After a
+successful publication, the active target and retained `PROPOSED` path are hard-link
+aliases for the same file object; the captured `SOURCE` backup is a separate recovery
+object.
+Review the plan before applying it, then use the
+reported `doctor` command and host reconnection checks. See [Host Setup](docs/host-setup.md).
 
 For local development from this repository:
 

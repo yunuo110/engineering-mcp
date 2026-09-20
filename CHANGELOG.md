@@ -4,6 +4,22 @@
 
 ### Added
 
+- Safe Configure for Codex/Grok native TOML with preview-by-default plans,
+  self-contained immutable preview/apply consistency identities, explicit repository
+  pinning, package-proven direct/Node launcher detection, capture-then-create retained
+  backups, hard-link create-if-absent installation, state-derived crash recovery,
+  byte-preserving semantic no-ops, surgical owned-field updates, and post-apply
+  doctor/connection guidance. Post-install failures deliberately require manual
+  recovery; Safe Configure never overwrites, rolls back, or cleans up an occupied path.
+  Same-plan concurrent capture is reconciled from source/proposal content identities,
+  and Windows updates preserve and verify the existing file's Owner and DACL before
+  capture. Final Windows installation is bound to one verified physical proposal handle,
+  while byte-identical retained sources require matching Owner+DACL authorization. The
+  actual native object-bound publication primitive is capability-probed on disposable
+  same-volume artifacts before destructive capture. The Windows security contract is
+  preservation plus transactional safety against ordinary path/content races; principals
+  independently authorized for `WRITE_DAC`, `WRITE_OWNER`, ownership, backup/restore,
+  or elevated/SYSTEM authority are explicitly outside Safe Configure's isolation boundary.
 - Immutable implementation checkpoints with durable Git/ledger provenance for
   blocked takeover and completed review handoff.
 - Dedicated diagnosis creation bound to a finalized `REVIEW` checkpoint.
