@@ -20,7 +20,7 @@ import {
 } from './configure.ts';
 import { C2C_PRIVATE_OPERATION, C2C_PRIVATE_TRANSPORT, C2C_PROTOCOL_VERSION } from './c2c/schema.ts';
 
-const VERSION = '0.1.1';
+const VERSION = '0.2.0';
 const serverEntry = resolveRuntimeEntry(import.meta.url, {
   source: './index.ts',
   dist: './index.js',

@@ -5,7 +5,7 @@ export function createEngineeringServer(config: ServerConfig): McpServer {
   const server = new McpServer(
     {
       name: 'engineering-mcp',
-      version: '0.1.1',
+      version: '0.2.0',
     },
     {
       capabilities: {
