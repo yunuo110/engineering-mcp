@@ -110,7 +110,7 @@ describe('Safe Configure capture-then-create transaction', () => {
     expect(source).toContain("linkSync(sourcePath, targetPath)");
   });
 
-  it('captures an external write immediately before move, restores it create-if-absent, and invalidates the plan', async () => {
+  it.skipIf(process.platform !== 'win32')('captures an external write immediately before move, restores it create-if-absent, and invalidates the plan', async () => {
     const item = fixture();
     const external = Buffer.from('setting = "external-before-capture"\n');
     const child = startChild(item.identity, 'before-capture');
@@ -139,7 +139,7 @@ describe('Safe Configure capture-then-create transaction', () => {
     expect(report.error.details.artifacts.every((artifact) => artifact.path && artifact.hash && artifact.identity)).toBe(true);
   });
 
-  it('never overwrites a target recreated after capture', async () => {
+  it.skipIf(process.platform !== 'win32')('never overwrites a target recreated after capture', async () => {
     const item = fixture();
     const external = Buffer.from('setting = "recreated"\n');
     const child = startChild(item.identity, 'after-capture');
@@ -167,7 +167,7 @@ describe('Safe Configure capture-then-create transaction', () => {
   });
 
   for (const boundary of ['before-capture', 'after-capture', 'after-install'] as const) {
-    it(`recovers by exact retry after process termination at ${boundary}`, async () => {
+    it.skipIf(process.platform !== 'win32')(`recovers by exact retry after process termination at ${boundary}`, async () => {
       const item = fixture();
       const child = startChild(item.identity, boundary);
       await waitForBoundary(child, boundary);
@@ -180,7 +180,7 @@ describe('Safe Configure capture-then-create transaction', () => {
     });
   }
 
-  it('allows only one competing installation and never loses the captured source', async () => {
+  it.skipIf(process.platform !== 'win32')('allows only one competing installation and never loses the captured source', async () => {
     const item = fixture();
     const first = startChild(item.identity);
     const second = startChild(item.identity);
@@ -193,7 +193,7 @@ describe('Safe Configure capture-then-create transaction', () => {
     expect(readFileSync(replay.backup_path!, 'utf8')).toBe('setting = "source"\n');
   });
 
-  it('deterministically reconciles P1 installing P before P2 captures P', async () => {
+  it.skipIf(process.platform !== 'win32')('deterministically reconciles P1 installing P before P2 captures P', async () => {
     const item = fixture();
     const first = startChild(item.identity, 'before-capture');
     const second = startChild(item.identity, 'before-capture,after-capture');
@@ -221,7 +221,7 @@ describe('Safe Configure capture-then-create transaction', () => {
     expect(replay.artifacts.every((artifact) => artifact.path && artifact.hash && artifact.identity)).toBe(true);
   });
 
-  it('restores a captured same-plan proposal after P2 is killed immediately after capture', async () => {
+  it.skipIf(process.platform !== 'win32')('restores a captured same-plan proposal after P2 is killed immediately after capture', async () => {
     const item = fixture();
     const first = startChild(item.identity, 'before-capture');
     const second = startChild(item.identity, 'before-capture,after-capture');
@@ -248,7 +248,7 @@ describe('Safe Configure capture-then-create transaction', () => {
     expect(backupContents).toContain(item.proposed);
   });
 
-  it('preserves external B when it appears during recovery of captured P', async () => {
+  it.skipIf(process.platform !== 'win32')('preserves external B when it appears during recovery of captured P', async () => {
     const item = fixture();
     const first = startChild(item.identity, 'before-capture');
     const second = startChild(item.identity, 'before-capture,after-capture');
@@ -279,7 +279,7 @@ describe('Safe Configure capture-then-create transaction', () => {
     expect(report.error.details.artifacts.every((artifact) => artifact.path && artifact.hash && artifact.identity)).toBe(true);
   });
 
-  it('passes repeated deterministic same-plan capture stress', async () => {
+  it.skipIf(process.platform !== 'win32')('passes repeated deterministic same-plan capture stress', async () => {
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const item = fixture(`setting = "source-${attempt}"\n`);
       const first = startChild(item.identity, 'before-capture');
@@ -296,7 +296,7 @@ describe('Safe Configure capture-then-create transaction', () => {
     }
   }, 120_000);
 
-  it('keeps capability probes outside replay authority and transaction evidence', () => {
+  it.skipIf(process.platform !== 'win32')('keeps capability probes outside replay authority and transaction evidence', () => {
     const item = fixture();
     const applied = applyConfigurePlanIdentity(item.identity);
     expect(applied.mode).toBe('APPLIED');
@@ -335,7 +335,7 @@ describe('Safe Configure capture-then-create transaction', () => {
     expect(replay.artifacts.every((artifact) => !artifact.path.includes('.linkcheck.'))).toBe(true);
   });
 
-  it('reconstructs a real proposal instead of recovering from a proposed-hash capability probe', () => {
+  it.skipIf(process.platform !== 'win32')('reconstructs a real proposal instead of recovering from a proposed-hash capability probe', () => {
     const item = fixture();
     expectConfigureError(
       () => applyConfigurePlanIdentity(item.identity, {
@@ -422,7 +422,7 @@ describe('Safe Configure capture-then-create transaction', () => {
     });
   });
 
-  it('reports complete State-E evidence on every exact retry', async () => {
+  it.skipIf(process.platform !== 'win32')('reports complete State-E evidence on every exact retry', async () => {
     const item = fixture();
     const child = startChild(item.identity, 'after-capture');
     await waitForBoundary(child, 'after-capture');
@@ -464,8 +464,8 @@ describe('Safe Configure capture-then-create transaction', () => {
     }
   });
 
-  it('fails closed before capture when hard-link create-if-absent is unavailable', () => {
-    const item = fixture();
+  it('fails closed before first-install publication when hard-link create-if-absent is unavailable', () => {
+    const item = fixture(null);
     expectConfigureError(
       () => applyConfigurePlanIdentity(item.identity, {
         hooks: {
@@ -476,6 +476,6 @@ describe('Safe Configure capture-then-create transaction', () => {
       }),
       'CONFIGURE_UNSUPPORTED',
     );
-    expect(readFileSync(item.config, 'utf8')).toBe('setting = "source"\n');
+    expect(existsSync(item.config)).toBe(false);
   });
 });

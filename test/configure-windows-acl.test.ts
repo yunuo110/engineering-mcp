@@ -16,6 +16,9 @@ type AuthorizationDescriptor = {
   owner_sddl: string;
   dacl_sddl: string;
   combined_sddl: string;
+  owner_sid: string | null;
+  dacl_present: boolean;
+  dacl_binary_base64: string | null;
   access_rules_protected: boolean;
 };
 
@@ -41,9 +44,29 @@ function authorization(path: string): AuthorizationDescriptor {
     '$access=[System.Security.AccessControl.AccessControlSections]::Access',
     '$combined=$owner -bor $access',
     '$acl=[System.IO.File]::GetAccessControl($path,$combined)',
-    '[pscustomobject]@{owner_sddl=$acl.GetSecurityDescriptorSddlForm($owner);dacl_sddl=$acl.GetSecurityDescriptorSddlForm($access);combined_sddl=$acl.GetSecurityDescriptorSddlForm($combined);access_rules_protected=$acl.AreAccessRulesProtected}|ConvertTo-Json -Compress',
+    '$raw=New-Object System.Security.AccessControl.RawSecurityDescriptor($acl.GetSecurityDescriptorBinaryForm(),0)',
+    '$ownerSid=$null;if($null -ne $raw.Owner){$ownerSid=$raw.Owner.Value}',
+    '$daclPresent=$null -ne $raw.DiscretionaryAcl',
+    '$daclBinary=$null;if($daclPresent){$daclBytes=New-Object byte[] $raw.DiscretionaryAcl.BinaryLength;$raw.DiscretionaryAcl.GetBinaryForm($daclBytes,0);$daclBinary=[Convert]::ToBase64String($daclBytes)}',
+    '[pscustomobject]@{owner_sddl=$acl.GetSecurityDescriptorSddlForm($owner);dacl_sddl=$acl.GetSecurityDescriptorSddlForm($access);combined_sddl=$acl.GetSecurityDescriptorSddlForm($combined);owner_sid=$ownerSid;dacl_present=$daclPresent;dacl_binary_base64=$daclBinary;access_rules_protected=$acl.AreAccessRulesProtected}|ConvertTo-Json -Compress',
   ].join(';');
   return JSON.parse(powershell(script, { ACL_TEST_PATH: path })) as AuthorizationDescriptor;
+}
+
+function semanticAuthorization(descriptor: AuthorizationDescriptor): Pick<
+  AuthorizationDescriptor,
+  'owner_sid' | 'dacl_present' | 'dacl_binary_base64' | 'access_rules_protected'
+> {
+  return {
+    owner_sid: descriptor.owner_sid,
+    dacl_present: descriptor.dacl_present,
+    dacl_binary_base64: descriptor.dacl_binary_base64,
+    access_rules_protected: descriptor.access_rules_protected,
+  };
+}
+
+function expectSameAuthorization(path: string, expected: AuthorizationDescriptor): void {
+  expect(semanticAuthorization(authorization(path))).toEqual(semanticAuthorization(expected));
 }
 
 function setProtectedAcl(path: string, includeUsersAllow: boolean): void {
@@ -105,6 +128,24 @@ function protectExistingRules(path: string): void {
   powershell(script, { ACL_TEST_PATH: path });
 }
 
+function addExplicitAclRule(path: string, sid: string, type: 'Allow' | 'Deny'): void {
+  const script = [
+    "$path=[Environment]::GetEnvironmentVariable('ACL_TEST_PATH','Process')",
+    "$sid=New-Object System.Security.Principal.SecurityIdentifier([Environment]::GetEnvironmentVariable('ACL_TEST_RULE_SID','Process'))",
+    "$type=[System.Enum]::Parse([System.Security.AccessControl.AccessControlType],[Environment]::GetEnvironmentVariable('ACL_TEST_RULE_TYPE','Process'))",
+    '$sections=[System.Security.AccessControl.AccessControlSections]::Owner -bor [System.Security.AccessControl.AccessControlSections]::Access',
+    '$acl=[System.IO.File]::GetAccessControl($path,$sections)',
+    '$rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,[System.Security.AccessControl.FileSystemRights]::ReadData,$type)',
+    '$acl.AddAccessRule($rule)',
+    '[System.IO.File]::SetAccessControl($path,$acl)',
+  ].join(';');
+  powershell(script, {
+    ACL_TEST_PATH: path,
+    ACL_TEST_RULE_SID: sid,
+    ACL_TEST_RULE_TYPE: type,
+  });
+}
+
 function duplicateSourcePath(sourcePath: string, token: string): string {
   return sourcePath.replace(/\.source\.[^.]+\.bak$/, `.source.${token}.bak`);
 }
@@ -162,8 +203,8 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
     const prepared = prepareConfigure({ host: 'codex', configPath: item.config, repo: item.repo, cwd: item.repo });
     const result = applyPreparedConfigure(prepared);
 
-    expect(authorization(item.config)).toEqual(expected);
-    expect(authorization(result.backup_path!)).toEqual(expected);
+    expectSameAuthorization(item.config, expected);
+    expectSameAuthorization(result.backup_path!, expected);
   });
 
   it('preserves explicit allow entries without broadening inherited access', () => {
@@ -174,8 +215,8 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
     const prepared = prepareConfigure({ host: 'codex', configPath: item.config, repo: item.repo, cwd: item.repo });
     const result = applyPreparedConfigure(prepared);
 
-    expect(authorization(item.config)).toEqual(expected);
-    expect(authorization(result.backup_path!)).toEqual(expected);
+    expectSameAuthorization(item.config, expected);
+    expectSameAuthorization(result.backup_path!, expected);
   });
 
   it('preserves inherited/unprotected DACL state', () => {
@@ -186,8 +227,8 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
     const prepared = prepareConfigure({ host: 'codex', configPath: item.config, repo: item.repo, cwd: item.repo });
     const result = applyPreparedConfigure(prepared);
 
-    expect(authorization(item.config)).toEqual(expected);
-    expect(authorization(result.backup_path!)).toEqual(expected);
+    expectSameAuthorization(item.config, expected);
+    expectSameAuthorization(result.backup_path!, expected);
   });
 
   it('fails before capture when generic links work but the native object-bound preflight fails', () => {
@@ -217,7 +258,7 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
     expect(captured).toBe(false);
     expect(existsSync(item.config)).toBe(true);
     expect(readFileSync(item.config)).toEqual(sourceBytes);
-    expect(authorization(item.config)).toEqual(expectedAuthorization);
+    expectSameAuthorization(item.config, expectedAuthorization);
     expect(readdirSync(item.root).filter((name) => name.endsWith('.bak'))).toEqual([]);
   });
 
@@ -260,7 +301,7 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
 
     const replay = applyConfigurePlanIdentity(identity);
     expect(replay.mode).toBe('ALREADY_APPLIED');
-    expect(authorization(item.config)).toEqual(expected);
+    expectSameAuthorization(item.config, expected);
     expect(replay.retained_artifacts.every((path) => !path.includes('.linkcheck.'))).toBe(true);
     expect(replay.artifacts.every((artifact) => !artifact.path.includes('.linkcheck.'))).toBe(true);
   });
@@ -280,7 +321,7 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
 
     expect(existsSync(item.config)).toBe(true);
     expect(readFileSync(item.config)).toEqual(sourceBytes);
-    expect(authorization(item.config)).toEqual(expected);
+    expectSameAuthorization(item.config, expected);
     expect(readdirSync(item.root).filter((name) => name.endsWith('.bak'))).toEqual([]);
   });
 
@@ -299,7 +340,7 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
       );
       expect(existsSync(item.config)).toBe(false);
     }
-  });
+  }, 120_000);
 
   it('accepts byte-identical SOURCE artifacts only when their authorization is identical', () => {
     const item = recoveryFixture();
@@ -309,8 +350,60 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
 
     const result = applyConfigurePlanIdentity(item.identity);
     expect(result.mode).toBe('ALREADY_APPLIED');
-    expect(authorization(item.config)).toEqual(authorization(item.sourceBackup));
+    expect(semanticAuthorization(authorization(item.config))).toEqual(semanticAuthorization(authorization(item.sourceBackup)));
   });
+
+  it('accepts equivalent unprotected SOURCE authorization when only auto-inherited SDDL bookkeeping differs', () => {
+    const item = recoveryFixture();
+    const duplicate = duplicateSourcePath(item.sourceBackup, '000-auto-inherited-normalized');
+    copyFileSync(item.sourceBackup, duplicate);
+    copyAuthorization(item.sourceBackup, duplicate);
+
+    const toggleAutoInherited = (sddl: string): string =>
+      sddl.includes('D:AI') ? sddl.replace('D:AI', 'D:') : sddl.replace('D:', 'D:AI');
+
+    const result = applyConfigurePlanIdentity(item.identity, {
+      hooks: {
+        observeWindowsAuthorization: ({ path, actual }) => path === duplicate
+          ? {
+              ...actual,
+              dacl_sddl: toggleAutoInherited(actual.dacl_sddl),
+              combined_sddl: toggleAutoInherited(actual.combined_sddl),
+            }
+          : actual,
+      },
+    });
+
+    expect(result.mode).toBe('ALREADY_APPLIED');
+    expectSameAuthorization(item.config, authorization(item.sourceBackup));
+  });
+
+  for (const [type, sid] of [
+    ['Allow', 'S-1-5-32-545'],
+    ['Deny', 'S-1-5-32-546'],
+  ] as const) {
+    it(`rejects byte-identical SOURCE artifacts with an extra ${type.toLowerCase()} ACE`, () => {
+      const item = recoveryFixture();
+      const duplicate = duplicateSourcePath(item.sourceBackup, `extra-${type.toLowerCase()}`);
+      copyFileSync(item.sourceBackup, duplicate);
+      copyAuthorization(item.sourceBackup, duplicate);
+      addExplicitAclRule(duplicate, sid, type);
+
+      expect(semanticAuthorization(authorization(duplicate))).not.toEqual(
+        semanticAuthorization(authorization(item.sourceBackup)),
+      );
+
+      const error = expectConfigureError(
+        () => applyConfigurePlanIdentity(item.identity),
+        'CONFIGURE_MANUAL_RECOVERY_REQUIRED',
+      );
+      const conflicts = error.details!.conflicting_source_authorizations as Array<{
+        authorization: { fingerprint: string };
+      }>;
+      expect(new Set(conflicts.map((entry) => entry.authorization.fingerprint)).size).toBe(2);
+      expect(existsSync(item.config)).toBe(false);
+    });
+  }
 
   for (const token of ['000-divergent-first', 'zzz-divergent-last']) {
     it(`rejects byte-identical SOURCE artifacts with divergent protected DACL regardless of pathname order (${token})`, () => {
@@ -342,13 +435,19 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
     expectConfigureError(
       () => applyConfigurePlanIdentity(item.identity, {
         hooks: {
-          observeWindowsAuthorization: ({ path, actual }) => path === duplicate
-            ? {
-                ...actual,
-                owner_sddl: 'O:BA',
-                combined_sddl: `O:BA${actual.dacl_sddl}`,
-              }
-            : actual,
+          observeWindowsAuthorization: ({ path, actual }) => {
+            if (path !== duplicate) return actual;
+
+            const useSystem = actual.owner_sid === 'S-1-5-32-544';
+            const ownerSddl = useSystem ? 'O:SY' : 'O:BA';
+
+            return {
+              ...actual,
+              owner_sddl: ownerSddl,
+              combined_sddl: `${ownerSddl}${actual.dacl_sddl}`,
+              owner_sid: useSystem ? 'S-1-5-18' : 'S-1-5-32-544',
+            };
+          },
         },
       }),
       'CONFIGURE_MANUAL_RECOVERY_REQUIRED',

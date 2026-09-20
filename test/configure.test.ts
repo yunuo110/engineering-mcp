@@ -84,7 +84,31 @@ describe('Safe Configure planning and application', () => {
     expect(readdirSync(dirname(item.config))).toEqual([]);
   });
 
-  it('creates and verifies a backup before mutation while preserving unrelated bytes and unknown owned keys', () => {
+  it('renders an existing configuration surgically while preserving CRLF, comments, unrelated tables, and unknown keys', () => {
+    const item = fixture();
+    const original = `theme = "night"\r\n\r\n[mcp_servers.other]\r\ncommand = "other-server"\r\nargs = ["--keep"]\r\n\r\n[mcp_servers.engineering-mcp]\r\n# operator comment\r\ncommand = "legacy-engineering-mcp" # old command\r\nargs = ["--role", "junior"] # old args\r\nenabled = true\r\n\r\n[ui]\r\naccent = "blue"\r\n`;
+    writeFileSync(item.config, original, 'utf8');
+
+    const prepared = prepareConfigure({
+      host: 'codex',
+      configPath: item.config,
+      repo: item.repo,
+      cwd: item.repo,
+      command: 'engineering-mcp',
+    });
+
+    expect(readFileSync(item.config, 'utf8')).toBe(original);
+    expect(prepared.proposedContent).toContain('theme = "night"\r\n');
+    expect(prepared.proposedContent).toContain('[mcp_servers.other]\r\ncommand = "other-server"\r\nargs = ["--keep"]');
+    expect(prepared.proposedContent).toContain('# operator comment\r\n');
+    expect(prepared.proposedContent).toContain('enabled = true\r\n');
+    expect(prepared.proposedContent).toContain('[ui]\r\naccent = "blue"\r\n');
+    expect(prepared.proposedContent).toContain('# old command');
+    expect(prepared.proposedContent).toContain('# old args');
+    expect(prepared.proposedContent).toContain(`args = ["--role", "owner", "--repo", ${JSON.stringify(item.repo)}] # old args\r\n`);
+  });
+
+  it.skipIf(process.platform !== 'win32')('creates and verifies a backup before mutation while preserving unrelated bytes and unknown owned keys', () => {
     const item = fixture();
     const original = `theme = "night"\r\n\r\n[mcp_servers.other]\r\ncommand = "other-server"\r\nargs = ["--keep"]\r\n\r\n[mcp_servers.engineering-mcp]\r\n# operator comment\r\ncommand = "legacy-engineering-mcp" # old command\r\nargs = ["--role", "junior"] # old args\r\nenabled = true\r\n\r\n[ui]\r\naccent = "blue"\r\n`;
     writeFileSync(item.config, original, 'utf8');
@@ -126,7 +150,7 @@ describe('Safe Configure planning and application', () => {
     });
   });
 
-  it('updates an existing simple entry without regenerating the full TOML document', () => {
+  it.skipIf(process.platform !== 'win32')('updates an existing simple entry without regenerating the full TOML document', () => {
     const item = fixture();
     const profiles = 'operator-profiles.yaml';
     const customCommand = 'engineering-mcp-custom';
@@ -243,21 +267,36 @@ describe('Safe Configure planning and application', () => {
     expect(prepared.plan.intended_entry.args).toEqual(['--role', 'owner', '--repo', item.repo]);
   });
 
-  it('makes repeated apply deterministic and creates no backup for the no-op', () => {
+  it('makes repeated first-install apply deterministic and creates no backup for the no-op', () => {
     const item = fixture();
-    writeFileSync(item.config, 'setting = "keep"\n');
     const first = prepareConfigure({ host: 'codex', configPath: item.config, repo: item.repo, cwd: item.repo });
-    applyPreparedConfigure(first);
-    expect(backups(item.config)).toHaveLength(1);
+    const firstResult = applyPreparedConfigure(first);
+    expect(firstResult).toMatchObject({ mode: 'APPLIED', changed: true, backup_path: null });
+    expect(backups(item.config)).toHaveLength(0);
 
     const second = prepareConfigure({ host: 'codex', configPath: item.config, repo: item.repo, cwd: item.repo });
     expect(second.plan.no_change).toBe(true);
     const result = applyPreparedConfigure(second);
     expect(result).toMatchObject({ mode: 'NO_CHANGE', changed: false, backup_path: null });
-    expect(backups(item.config)).toHaveLength(1);
+    expect(backups(item.config)).toHaveLength(0);
   });
 
-  it('detects source races after preview without creating a backup', () => {
+  it.skipIf(process.platform === 'win32')('fails existing-config mutation before creating transaction artifacts on non-Windows', () => {
+    const item = fixture();
+    const original = 'setting = "portable-preview-only"\n';
+    writeFileSync(item.config, original);
+    const beforeNames = readdirSync(dirname(item.config)).sort();
+    const prepared = prepareConfigure({ host: 'codex', configPath: item.config, repo: item.repo, cwd: item.repo });
+
+    const error = expectConfigureError(() => applyPreparedConfigure(prepared), 'CONFIGURE_UNSUPPORTED');
+
+    expect(error.details).toMatchObject({ config_path: item.config, platform: process.platform });
+    expect(readFileSync(item.config, 'utf8')).toBe(original);
+    expect(readdirSync(dirname(item.config)).sort()).toEqual(beforeNames);
+    expect(backups(item.config)).toEqual([]);
+  });
+
+  it.skipIf(process.platform !== 'win32')('detects source races after preview without creating a backup', () => {
     const item = fixture();
     writeFileSync(item.config, 'setting = "before"\n');
     const prepared = prepareConfigure({ host: 'codex', configPath: item.config, repo: item.repo, cwd: item.repo });
@@ -268,7 +307,7 @@ describe('Safe Configure planning and application', () => {
     expect(backups(item.config)).toEqual([]);
   });
 
-  it('retains the captured source for exact retry when failure occurs before installation', () => {
+  it.skipIf(process.platform !== 'win32')('retains the captured source for exact retry when failure occurs before installation', () => {
     const item = fixture();
     const original = 'setting = "safe"\n';
     writeFileSync(item.config, original);
@@ -282,7 +321,7 @@ describe('Safe Configure planning and application', () => {
     expect(backups(item.config)).toHaveLength(1);
   });
 
-  it('does not automatically roll back after installation', () => {
+  it.skipIf(process.platform !== 'win32')('does not automatically roll back after installation', () => {
     const item = fixture();
     const original = 'setting = "safe"\n';
     writeFileSync(item.config, original);
@@ -296,7 +335,7 @@ describe('Safe Configure planning and application', () => {
     expect(backups(item.config)).toHaveLength(1);
   });
 
-  it('refuses rollback after a third-party post-replacement edit and preserves both edit and backup', () => {
+  it.skipIf(process.platform !== 'win32')('refuses rollback after a third-party post-replacement edit and preserves both edit and backup', () => {
     const item = fixture();
     const original = Buffer.from('setting = "safe"\n', 'utf8');
     const external = Buffer.from('setting = "third-party"\n', 'utf8');
@@ -320,7 +359,7 @@ describe('Safe Configure planning and application', () => {
     expect(error.details).toMatchObject({ config_path: item.config, backup_path: backup });
   });
 
-  it('never reuses a pre-existing backup pathname', () => {
+  it.skipIf(process.platform !== 'win32')('never reuses a pre-existing backup pathname', () => {
     const item = fixture();
     const original = Buffer.from('setting = "original"\n', 'utf8');
     writeFileSync(item.config, original);
@@ -331,7 +370,7 @@ describe('Safe Configure planning and application', () => {
     expect(backups(item.config)).toEqual([result.backup_path!.split(/[\\/]/).at(-1)]);
   });
 
-  it('does not replace the target or delete a backup changed by another writer', () => {
+  it.skipIf(process.platform !== 'win32')('does not replace the target or delete a backup changed by another writer', () => {
     const item = fixture();
     const original = Buffer.from('setting = "original"\n', 'utf8');
     const externalBackup = Buffer.from('backup changed by another writer\n', 'utf8');
@@ -374,7 +413,7 @@ describe('Safe Configure planning and application', () => {
     });
   });
 
-  it('recognizes the same Windows Node launcher by filesystem identity across path casing', () => {
+  it.skipIf(process.platform !== 'win32')('recognizes the same Windows Node launcher by filesystem identity across path casing', () => {
     const item = fixture();
     const script = installedLauncher(item.home);
     const differentlyCased = script
@@ -479,7 +518,7 @@ describe('Safe Configure planning and application', () => {
     );
   });
 
-  it('does not overwrite an external edit made after the verified backup', () => {
+  it.skipIf(process.platform !== 'win32')('does not overwrite an external edit made after the verified backup', () => {
     const item = fixture();
     const original = 'setting = "previewed"\n';
     const external = 'setting = "external edit"\n';
@@ -494,7 +533,7 @@ describe('Safe Configure planning and application', () => {
     expect(backups(item.config)).toHaveLength(1);
   });
 
-  it('surgically updates a quoted owned table while preserving its descendant table', () => {
+  it.skipIf(process.platform !== 'win32')('surgically updates a quoted owned table while preserving its descendant table', () => {
     const item = fixture();
     writeFileSync(
       item.config,
