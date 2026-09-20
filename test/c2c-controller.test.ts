@@ -198,7 +198,7 @@ describe('production C2C controller registration and wire authority', () => {
     expect(counts(f)).toEqual([0, 0, 0]);
   });
 });
-describe('production C2C frozen phase orchestration', () => {
+describe.skipIf(process.platform !== 'win32')('production C2C frozen phase orchestration', () => {
   it('runs public tool -> four real phases -> native Harness -> terminal lifecycle and S2', async () => {
     const f = fixture(); const launch = trackLaunch();
     const c = await controllerConnection(f.context); connections.push(c);

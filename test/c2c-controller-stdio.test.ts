@@ -167,7 +167,7 @@ describe('public CLI and production stdio controller', () => {
     expect(c.log()).not.toContain('DO_NOT_LOG_ENVIRONMENT');
   });
 
-  it('runs a real CLI -> server -> controller -> native worker without any production test hook', async () => {
+  it.skipIf(process.platform !== 'win32')('runs a real CLI -> server -> controller -> native worker without any production test hook', async () => {
     const f = fixture(); const c = await connect(f, true);
     expect((await c.client.listTools()).tools.map((t) => t.name).sort()).toEqual([...OWNER_TOOLS, 'execute_c2c_plan'].sort());
     await waitFor(() => c.log().includes('c2c_controller_enabled'));

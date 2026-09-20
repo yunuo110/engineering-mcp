@@ -65,7 +65,7 @@ function savedTarget(store: Store, commandId: string): string {
   } finally { raw.close(); }
 }
 
-describe('Harness Bridge B real native GenericCli C2C path', () => {
+describe.skipIf(process.platform !== 'win32')('Harness Bridge B real native GenericCli C2C path', () => {
   it('runs the real controlled Worker, exact native exe, frozen EWP, lifecycle and independent S2 evidence', async () => {
     const f = genericFixture(dirs, stores);
     const beforeJson = savedTarget(f.store, f.command.command_id);

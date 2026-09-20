@@ -37,7 +37,7 @@ const terminal = {
   known_limitations: [], exit_code: 0,
 };
 
-describe('Harness Bridge B strict GenericCli durable target V1', () => {
+describe.skipIf(process.platform !== 'win32')('Harness Bridge B strict GenericCli durable target V1', () => {
   it('builds only the compiled GenericCli target and preserves canonical native artifact identity', () => {
     const path = exe();
     const built = buildDurableTargetFromTrustedProfile(profiles(genericManifest(path)), 'generic');
