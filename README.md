@@ -522,7 +522,7 @@ establishes a real Codex-host E2E session for this release.
 | --- | --- |
 | Codex CLI + GPT-5.6 Luna | `CONTROLLED PROCESS TESTS — AUTHENTICATED MODEL E2E NOT VERIFIED` |
 | GenericCliAdapter | `CONTROLLED HARNESS / PACKAGED MCP FLOW TESTED` |
-| DSH + DeepSeek V4 Flash Max | `HISTORICAL INTEGRATION — NOT REVALIDATED FOR 0.1.1` |
+| DSH + DeepSeekFlash Max | `HISTORICAL INTEGRATION — NOT REVALIDATED FOR 0.1.1` |
 
 Codex worker evidence in this release covers process invocation and Windows `.cmd`
 wrapper behavior using a controlled local Harness
