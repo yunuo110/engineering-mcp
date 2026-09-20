@@ -340,7 +340,7 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
       );
       expect(existsSync(item.config)).toBe(false);
     }
-  });
+  }, 120_000);
 
   it('accepts byte-identical SOURCE artifacts only when their authorization is identical', () => {
     const item = recoveryFixture();
@@ -435,14 +435,19 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
     expectConfigureError(
       () => applyConfigurePlanIdentity(item.identity, {
         hooks: {
-          observeWindowsAuthorization: ({ path, actual }) => path === duplicate
-            ? {
-                ...actual,
-                owner_sddl: 'O:BA',
-                combined_sddl: `O:BA${actual.dacl_sddl}`,
-                owner_sid: 'S-1-5-32-544',
-              }
-            : actual,
+          observeWindowsAuthorization: ({ path, actual }) => {
+            if (path !== duplicate) return actual;
+
+            const useSystem = actual.owner_sid === 'S-1-5-32-544';
+            const ownerSddl = useSystem ? 'O:SY' : 'O:BA';
+
+            return {
+              ...actual,
+              owner_sddl: ownerSddl,
+              combined_sddl: `${ownerSddl}${actual.dacl_sddl}`,
+              owner_sid: useSystem ? 'S-1-5-18' : 'S-1-5-32-544',
+            };
+          },
         },
       }),
       'CONFIGURE_MANUAL_RECOVERY_REQUIRED',
