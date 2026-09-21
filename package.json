@@ -1,6 +1,6 @@
 {
   "name": "engineering-mcp-cli",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": false,
   "type": "module",
   "description": "Safety-first control plane for native coding-agent harnesses",

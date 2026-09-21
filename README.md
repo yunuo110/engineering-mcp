@@ -41,6 +41,11 @@ commit. Creating, claiming, and resuming tasks requires a clean working tree on 
 named branch. Install and authenticate the selected Harness separately; installing
 Engineering MCP does not install or authenticate Codex or another Harness.
 
+The current source release is [v0.2.0](https://github.com/yunuo110/engineering-mcp/releases/tag/v0.2.0).
+Publication of `engineering-mcp-cli@0.2.0` to npm is deferred. Use the `v0.2.0`
+GitHub source for the `engineering-c2c/1` contract; the npm command below installs
+the currently published package.
+
 Install from npm:
 
 ```bash
@@ -514,7 +519,7 @@ Support labels are intentionally conservative.
 | Grok CLI | `REAL HOST STARTUP / HANDSHAKE / TOOL DISCOVERY` |
 | Codex CLI | `MCP STARTUP / AUTO-REPO TEST COVERAGE — CODEX HOST E2E NOT VERIFIED FOR THIS RELEASE` |
 
-The release hardening check used real Grok CLI `1.0.24` with an installed package
+The 0.1.1 release hardening check used real Grok CLI `1.0.24` with an installed package
 in a temporary trusted project: the server started, negotiated MCP `2025-11-25`,
 and exposed ten OWNER tools. This check does not establish authenticated model
 execution or a real-host Worker handoff for 0.1.1.
@@ -531,7 +536,7 @@ establishes a real Codex-host E2E session for this release.
 | --- | --- |
 | Codex CLI + GPT-5.6 Luna | `CONTROLLED PROCESS TESTS — AUTHENTICATED MODEL E2E NOT VERIFIED` |
 | GenericCliAdapter | `CONTROLLED HARNESS / PACKAGED MCP FLOW TESTED` |
-| DSH + DeepSeekFlash Max | `HISTORICAL INTEGRATION — NOT REVALIDATED FOR 0.1.1` |
+| DSH + DeepSeekFlash Max | `HISTORICAL INTEGRATION — NOT REVALIDATED FOR 0.2.0` |
 
 Codex worker evidence in this release covers process invocation and Windows `.cmd`
 wrapper behavior using a controlled local Harness
@@ -545,11 +550,11 @@ separate from worker-model verification.
 
 Generic MCP coverage includes initialization, tool discovery, argument validation,
 controlled Harness execution, durable restart, and scope enforcement through an
-installed tarball. The validation platform for 0.1.1 is Windows with Node.js 24;
-Linux/macOS runtime validation is not claimed.
+installed tarball. The 0.1.1 validation platform was Windows with Node.js 24;
+that release did not claim Linux/macOS runtime validation.
 
 The earlier DSH integration report used DSH `0.1.2-rc.1` through a trusted
-bridge/wrapper. That integration was not rerun for 0.1.1.
+bridge/wrapper. That integration was not rerun for 0.2.0.
 
 The documented DSH integration is:
 

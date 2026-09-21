@@ -1,11 +1,18 @@
 # Changelog
 
-## Unreleased
+## [0.2.0] - 2026-09-20
 
 ### Added
 
 - A version-gated `engineering-mcp c2c-client` stdio entrypoint exposing only
-  the private `execute_c2c_plan` contract for companion integrations.
+  the private `execute_c2c_plan` operation under the `engineering-c2c/1` contract
+  for companion integrations.
+- Core C2C orchestration with durable evaluation receipts, plan acceptance,
+  delegation intents, a durable target registry, and controlled worker launch.
+  Exact replay preserves the original message and command identities.
+- Execution evidence binding and projections for execution summaries, output,
+  and test status, with worker-reported, runner-observed, and server-authoritative
+  provenance kept distinct.
 - Safe Configure for Codex/Grok native TOML with preview-by-default plans,
   self-contained immutable preview/apply consistency identities, explicit repository
   pinning, package-proven direct/Node launcher detection, capture-then-create retained
@@ -37,6 +44,16 @@
   intents now fence task and dispatch mutations repository-wide until exact retry finalizes them.
 - Worker evidence is separated into worker-reported, runner-observed, and
   server-authoritative layers; authoritative runner failures take precedence.
+
+### Compatibility and publication
+
+- This release versions capabilities already merged into Core; the default public
+  tool surface is unchanged. The private contract is documented in
+  `docs/c2c-private-contract.md`.
+- ChatGPT, OAuth/OIDC, and Workspace Access implementation remains in the optional
+  companion, outside Core.
+- Node.js 24 or newer is required.
+- GitHub source release; npm package publication is deferred.
 
 ## [0.1.1] - 2026-09-09
 
