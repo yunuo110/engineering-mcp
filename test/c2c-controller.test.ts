@@ -1,7 +1,7 @@
 import { configureUnitBootstrap, configureUnitWorker, resetUnitBootstrap, settleUnitBootstraps,
   syntheticChild, syntheticIdentityFrame, unitBootstrap } from './fixtures/c2c-native-unit-seam.ts';
 import { type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
@@ -54,7 +54,7 @@ function fixture() {
     },
   });
   configureUnitWorker((executable, args, options) => {
-    expect(executable).toBe(f.exe);
+    expect(executable).toBe(realpathSync.native(f.exe));
     expect(options).toMatchObject({ cwd: f.repo, shell: false, windowsHide: true });
     const [repo, runDir, taskId, dispatchId] = args as [string, string, string, string];
     expect(repo).toBe(f.repo); expect(taskId).toBe(f.task.id);
@@ -113,9 +113,11 @@ async function completed(f: ReturnType<typeof fixture>) {
     const task = f.store.getTask(f.task.id);
     const dispatches = f.store.listDispatchRunsForTask(f.task.id);
     const diagnostic = {
-      task: task && { status: task.status, revision: task.revision },
+      task: task && { status: task.status, revision: task.revision,
+        blocker: task.blocker && { reason: task.blocker.reason, summary: task.blocker.summary } },
       dispatches: dispatches.map((run) => ({ id: run.id, status: run.status,
-        runner_instance_id: run.runner_instance_id, execution_count: executionCount(dispatchRunDir(run.id)) })),
+        runner_instance_id: run.runner_instance_id, execution_count: executionCount(dispatchRunDir(run.id)),
+        error_code: run.error_code, error_detail: run.error_detail, exit_code: run.exit_code })),
       unit_bootstrap: { attempts: unitBootstrap.attempts, launches: unitBootstrap.launches.length,
         errors: unitBootstrap.errors.map((value) => value instanceof Error ? value.name : typeof value) },
       event_kinds: f.store.listEvents(f.task.id).map((event) => event.kind),
