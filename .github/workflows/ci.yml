@@ -40,7 +40,7 @@ jobs:
       - name: Windows contract tests
         if: runner.os == 'Windows'
         run: >-
-          npm exec -- vitest run
+          npm exec -- vitest run --maxWorkers 1
           test/native-build-attestation.test.ts
           test/runtime-environment.test.ts
           test/trusted-runtime-closure.test.ts

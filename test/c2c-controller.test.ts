@@ -107,7 +107,21 @@ function reservedInstance(f: ReturnType<typeof fixture>, dispatchId: string): st
   }).runner_instance_id;
 }
 async function completed(f: ReturnType<typeof fixture>) {
-  await waitFor(() => f.store.getTask(f.task.id)?.status === 'COMPLETED');
+  try {
+    await waitFor(() => f.store.getTask(f.task.id)?.status === 'COMPLETED');
+  } catch (error) {
+    const task = f.store.getTask(f.task.id);
+    const dispatches = f.store.listDispatchRunsForTask(f.task.id);
+    const diagnostic = {
+      task: task && { status: task.status, revision: task.revision },
+      dispatches: dispatches.map((run) => ({ id: run.id, status: run.status,
+        runner_instance_id: run.runner_instance_id, execution_count: executionCount(dispatchRunDir(run.id)) })),
+      unit_bootstrap: { attempts: unitBootstrap.attempts, launches: unitBootstrap.launches.length,
+        errors: unitBootstrap.errors.map((value) => value instanceof Error ? value.name : typeof value) },
+      event_kinds: f.store.listEvents(f.task.id).map((event) => event.kind),
+    };
+    throw new Error(`C2C_COMPLETION_TIMEOUT:${JSON.stringify(diagnostic)}`, { cause: error });
+  }
   expect(f.store.listEvents(f.task.id).filter((event) => event.kind === 'claimed')).toHaveLength(1);
   const receipt = f.store.getC2CDelegationIntentReceipt(f.request.delegation_command_id)!;
   expect(executionCount(dispatchRunDir(receipt.dispatch_run_id))).toBe(1);

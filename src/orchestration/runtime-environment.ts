@@ -21,6 +21,10 @@ function refuse(): never {
   throw new Error('CONTROL_ENVIRONMENT_REFUSED:unreviewed Windows environment behavior');
 }
 
+// This proof is scoped to this Node process and its exact runtime executable/version.
+// Explicit verifyWindowsControlEnvironment calls still validate and probe their argument.
+let provenRuntime: string | undefined;
+
 export function assertSupportedControlNode(version: string): void {
   const match = /^(\d+)\.\d+\.\d+$/.exec(version);
   if (!match || Number(match[1]) < 24) refuse();
@@ -49,7 +53,11 @@ export function verifyWindowsControlEnvironment(environment: NodeJS.ProcessEnv):
 export function boundedControlEnvironment(): NodeJS.ProcessEnv {
   if (process.platform === 'win32') {
     assertSupportedControlNode(process.versions.node);
-    verifyWindowsControlEnvironment(CONTROL_ENVIRONMENT);
+    const runtime = JSON.stringify([process.execPath, process.versions.node, process.versions.uv]);
+    if (provenRuntime !== runtime) {
+      verifyWindowsControlEnvironment(CONTROL_ENVIRONMENT);
+      provenRuntime = runtime;
+    }
   }
   return { ...CONTROL_ENVIRONMENT };
 }

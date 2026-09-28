@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFailed, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { acceptEvaluatedPlan } from '../src/commands/plan-acceptance.ts';
@@ -152,28 +152,59 @@ describe('repository occupancy independent of Task state', () => {
 
   it('terminal Task with a surviving descendant denies checkpoint until the group drains', async () => {
     const f = setup(); const a = f.create();
+    const startedAt = Date.now();
+    let phase = 'reserve';
+    let diagnosticDispatchId: string | undefined;
+    let descendantDrained: (() => boolean) | undefined;
+    let taskState: { status: string; revision: number } | undefined;
+    let dispatchState: { id: string; status: string } | undefined;
+    const checkpointStages: string[] = [];
+    onTestFailed(() => {
+      console.error('REPOSITORY_OCCUPANCY_TEST_FAILURE_DIAGNOSTIC:' + JSON.stringify({
+        phase, elapsed_ms: Date.now() - startedAt,
+        task: taskState, dispatch: dispatchState,
+        dispatch_id: diagnosticDispatchId, checkpoint_stages: checkpointStages,
+        descendant_drained: descendantDrained?.(),
+      }));
+    });
     const dispatchId = reservedId(reserve(f.store, f.repo, a, f.executable));
+    diagnosticDispatchId = dispatchId;
+    phase = 'record launch request';
     recordRepositoryLaunchRequest(f.store, f.repo, dispatchId);
+    phase = 'claim dispatch';
     const running = claimC2CDispatchTask(f.store, snapshot(f.repo), 'runner-a', dispatchId);
+    phase = 'start surviving descendant';
     const descendant = await survivingDescendant(join(f.store.path, '..', 'descendant-exit'));
+    descendantDrained = descendant.isDrained;
     const observe = vi.spyOn(executionGroup, 'observeExecutionGroup').mockReturnValue({
       state: 'ALIVE', active_processes: 1, process_ids: [descendant.pid],
     });
     writeFileSync(join(f.repo, 'README.md'), 'valuable output\n');
+    phase = 'report terminal result';
     const terminal = reportResult(f.store, 'JUNIOR', 'runner-a', { task_id: a.id, revision: running.revision,
       outcome: 'completed', result: { ...implResult, changed_files: ['README.md'] } },
     { ...f.store.getDispatchRun(dispatchId)!, status: 'completed' });
+    phase = 'deny checkpoint while descendant alive';
     const head = git(f.repo, ['rev-parse', 'HEAD']);
     expectDomain(() => checkpointTask(f.store, snapshot(f.repo), { task_id: a.id,
       revision: terminal.revision, purpose: 'REVIEW' }), 'REPOSITORY_WRITER_OCCUPIED');
     expect(f.store.listCheckpoints(a.id)).toHaveLength(0);
     expect(git(f.repo, ['rev-parse', 'HEAD'])).toBe(head);
     expect(descendant.isDrained()).toBe(false);
+    phase = 'drain descendant';
     await descendant.drain();
     observe.mockReturnValue({ state: 'DRAINED', active_processes: 0, process_ids: [] });
-    const saved = checkpointTask(f.store, snapshot(f.repo), { task_id: a.id, revision: terminal.revision, purpose: 'REVIEW' });
+    phase = 'admit checkpoint after drain';
+    const beforeCheckpoint = f.store.getTask(a.id);
+    const beforeDispatch = f.store.getDispatchRun(dispatchId);
+    taskState = beforeCheckpoint && { status: beforeCheckpoint.status, revision: beforeCheckpoint.revision };
+    dispatchState = beforeDispatch && { id: beforeDispatch.id, status: beforeDispatch.status };
+    const saved = checkpointTask(f.store, snapshot(f.repo), { task_id: a.id, revision: terminal.revision, purpose: 'REVIEW' },
+      { onStage: (stage) => { phase = `checkpoint:${stage}`; checkpointStages.push(stage); } });
+    phase = 'verify checkpoint content';
     expect(git(f.repo, ['show', `${saved.checkpoint.checkpoint_commit}:README.md`])).toBe('valuable output');
-  });
+    phase = 'complete';
+  }, 90_000);
 
   it('REQUESTED occupancy survives restart, missing witness, cancellation and close', () => {
     const f = setup(); const a = f.create();

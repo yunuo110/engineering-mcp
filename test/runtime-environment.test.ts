@@ -1,4 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return { ...actual, spawnSync: vi.fn(actual.spawnSync) };
+});
 import {
   assertSupportedControlNode,
   boundedControlEnvironment,
@@ -39,5 +45,34 @@ describe('bounded Windows control environment', () => {
     expect(() => verifyWindowsControlEnvironment(missingPath)).toThrow('CONTROL_ENVIRONMENT_REFUSED');
     expect(() => verifyWindowsControlEnvironment({ ...environment, PATH: 'untrusted' }))
       .toThrow('CONTROL_ENVIRONMENT_REFUSED');
+  });
+
+  it.skipIf(process.platform !== 'win32')('proves once per module/process, returns fresh copies, and explicitly revalidates', async () => {
+    vi.resetModules();
+    const runtime = await import('../src/orchestration/runtime-environment.ts');
+    const probe = vi.mocked(spawnSync);
+    probe.mockClear();
+    const first = runtime.boundedControlEnvironment();
+    const second = runtime.boundedControlEnvironment();
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(second).toEqual(first);
+    expect(second).not.toBe(first);
+    second.PATH = 'untrusted';
+    expect(runtime.boundedControlEnvironment().PATH).toBe('');
+    expect(() => runtime.verifyWindowsControlEnvironment(second)).toThrow('CONTROL_ENVIRONMENT_REFUSED');
+    expect(probe).toHaveBeenCalledTimes(1);
+    runtime.verifyWindowsControlEnvironment(first);
+    expect(probe).toHaveBeenCalledTimes(2);
+  });
+
+  it.skipIf(process.platform !== 'win32')('does not cache a failed child proof', async () => {
+    vi.resetModules();
+    const runtime = await import('../src/orchestration/runtime-environment.ts');
+    const probe = vi.mocked(spawnSync);
+    probe.mockClear();
+    probe.mockImplementationOnce(() => { throw new Error('unit probe failure'); });
+    expect(() => runtime.boundedControlEnvironment()).toThrow('CONTROL_ENVIRONMENT_REFUSED');
+    expect(() => runtime.boundedControlEnvironment()).not.toThrow();
+    expect(probe).toHaveBeenCalledTimes(2);
   });
 });
