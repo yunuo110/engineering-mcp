@@ -26,6 +26,12 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - name: Windows runtime versions
+        if: runner.os == 'Windows'
+        run: |
+          node --version
+          node -p "process.versions.uv"
+          npm --version
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
@@ -36,6 +42,7 @@ jobs:
         run: >-
           npm exec -- vitest run
           test/native-build-attestation.test.ts
+          test/runtime-environment.test.ts
           test/trusted-runtime-closure.test.ts
           test/authority-git.test.ts
           test/execution-evidence.test.ts

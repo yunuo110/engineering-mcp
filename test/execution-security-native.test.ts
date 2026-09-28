@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +17,15 @@ function run(operation: 'snapshot' | 'witness', request: unknown) {
     input: JSON.stringify(request), encoding: 'utf8', windowsHide: true, timeout: 10_000,
   });
 }
+function expectSuccess(operation: 'snapshot' | 'witness', request: unknown, fixturePath: string) {
+  const result = run(operation, request);
+  if (result.status !== 0 || result.error || result.signal) {
+    throw new Error(JSON.stringify({ operation, fixturePath, status: result.status,
+      signal: result.signal, stdout: result.stdout, stderr: result.stderr,
+      spawnError: result.error?.message }));
+  }
+  return result;
+}
 afterEach(() => {
   for (const path of created.splice(0)) {
     const root = resolve(tmpdir());
@@ -31,8 +40,7 @@ afterEach(() => {
 describe.skipIf(process.platform !== 'win32')('fixed native execution security boundary', () => {
   it('returns a bounded ACL snapshot without PowerShell', () => {
     const path = fixture();
-    const result = run('snapshot', [path]);
-    expect(result.status).toBe(0);
+    const result = expectSuccess('snapshot', [path], path);
     expect(result.stderr).toBe('');
     const value = JSON.parse(result.stdout) as { sid: string; rows: Array<{
       path: string; owner: string; protected: boolean; reparse: boolean;
@@ -40,7 +48,7 @@ describe.skipIf(process.platform !== 'win32')('fixed native execution security b
     }> };
     expect(value.sid).toMatch(/^S-1-/);
     expect(value.rows).toHaveLength(1);
-    expect(value.rows[0]).toMatchObject({ path, reparse: false });
+    expect(value.rows[0]).toMatchObject({ path: realpathSync.native(path), reparse: false });
     expect(value.rows[0]?.owner).toBe(value.sid);
     expect(value.rows[0]?.aces.length).toBeGreaterThan(0);
     expect(value.rows[0]?.sddl).toContain('D:');
@@ -51,12 +59,12 @@ describe.skipIf(process.platform !== 'win32')('fixed native execution security b
     const parent = fixture();
     const root = join(parent, 'execution-witnesses');
     const dispatch = join(root, '11111111-1111-4111-8111-111111111111');
-    const caller = JSON.parse(run('snapshot', [parent]).stdout) as { sid: string };
+    const caller = JSON.parse(expectSuccess('snapshot', [parent], parent).stdout) as { sid: string };
     const request = { operation: 'root', root, dispatch, core: caller.sid,
       keeper: 'S-1-5-19', operator: 'S-1-5-11' };
-    expect(run('witness', request).status).toBe(0);
+    expectSuccess('witness', request, root);
     expect(existsSync(root)).toBe(true);
-    const rootAcl = JSON.parse(run('snapshot', [root]).stdout) as { rows: Array<{
+    const rootAcl = JSON.parse(expectSuccess('snapshot', [root], root).stdout) as { rows: Array<{
       protected: boolean; aces: Array<{ sid: string; rights: number }>;
     }> };
     expect(rootAcl.rows[0]?.protected).toBe(true);
@@ -64,8 +72,8 @@ describe.skipIf(process.platform !== 'win32')('fixed native execution security b
     mkdirSync(join(dispatch, 'control'), { recursive: true });
     mkdirSync(join(dispatch, 'keeper'), { recursive: true });
     writeFileSync(join(dispatch, 'control', 'bootstrap.json'), '{}');
-    expect(run('witness', { ...request, operation: 'seal' }).status).toBe(0);
-    expect(run('witness', { ...request, operation: 'read' }).status).toBe(0);
+    expectSuccess('witness', { ...request, operation: 'seal' }, dispatch);
+    expectSuccess('witness', { ...request, operation: 'read' }, dispatch);
     expect(run('witness', { ...request, operation: 'read', core: 'S-1-5-19' }).status).toBe(86);
     writeFileSync(join(dispatch, 'keeper', 'drain-receipt.json'), '{}');
     expect(readFileSync(join(dispatch, 'keeper', 'drain-receipt.json'), 'utf8')).toBe('{}');

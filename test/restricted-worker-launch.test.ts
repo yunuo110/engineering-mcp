@@ -25,10 +25,13 @@ vi.mock('../src/orchestration/trusted-runtime.ts', () => ({
       workerSid: 'S-1-5-21-1-2-3-1003', operatorSid: 'S-1-5-21-1-2-3-1004' };
   }),
 }));
-vi.mock('node:child_process', () => ({ spawn: vi.fn(() => {
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...await importOriginal<typeof import('node:child_process')>(),
+  spawn: vi.fn(() => {
   if (state.spawnError) throw new Error('SPAWN_REFUSED');
   return state.child;
-}) }));
+  }),
+}));
 import { spawn } from 'node:child_process';
 import { closeSync } from 'node:fs';
 import { disposeRestrictedWorkerIdentity, initializeRestrictedWorkerIdentityFromStdin,
