@@ -1,9 +1,14 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DomainError } from './errors.ts';
+import { completionContradiction } from './result-consistency.ts';
+import { assertRepositoryWriterAdmission, assertRepositoryWritersDrained } from './orchestration/repository-occupancy.ts';
+import { isProtectedExecutionMode } from './orchestration/trusted-runtime.ts';
+import { isPathAllowedByScope } from './scope.ts';
 import { canClaimTaskType, isWorkerRole } from './role.ts';
 import type { Store } from './store.ts';
 import {
   assigneeForType,
+  createTaskInputSchema,
   WRITER_PROTOCOL_GENERATION,
   diagnosisPayloadSchema,
   diagnosisResultSchema,
@@ -221,6 +226,7 @@ export function requireNoRepositoryCheckpoint(store: Store): void {
 }
 
 function requireCheckpointRecoveryExclusive(store: Store, intent: CheckpointIntent): CheckpointIntent {
+  assertRepositoryWritersDrained(store, intent.repo_root);
   const pending = store.getAnyUnfinalizedCheckpoint();
   if (
     !pending ||
@@ -316,9 +322,24 @@ export function claimTask(
   revision: number,
   dispatch?: DispatchRun,
 ): TaskContract {
+  if (isProtectedExecutionMode()) {
+    throw new DomainError('ROLE_FORBIDDEN', 'Protected execution requires a managed C2C Runner claim');
+  }
   return store.transact(() => {
     const task = requireTask(store, taskId);
     requireNoRepositoryCheckpoint(store);
+    const reservation = store.getActiveC2CDelegationIntentForTask(task.id);
+    if (reservation) {
+      throw new DomainError(
+        'ILLEGAL_TRANSITION',
+        `Task ${task.id} is reserved by active C2C dispatch ${reservation.dispatch_run_id}`,
+        {
+          task_id: task.id,
+          dispatch_run_id: reservation.dispatch_run_id,
+          reservation: 'C2C',
+        },
+      );
+    }
     requireRevision(task, revision);
     if (task.status !== 'READY') {
       throw new DomainError(
@@ -340,6 +361,7 @@ export function claimTask(
       base_commit: task.base_commit,
     });
     requireCheckpointBaselineIntegrity(store, task);
+    assertRepositoryWriterAdmission(store, task.repo_root, { currentDispatchId: dispatch?.id });
     const running = store.getRunning();
     if (running) {
       throw new DomainError(
@@ -375,6 +397,185 @@ export function claimTask(
   });
 }
 
+
+export function claimC2CDispatchTask(
+  store: Store,
+  git: GitSnapshot,
+  executionInstanceId: string,
+  dispatchRunId: string,
+  runnerPid?: number,
+): TaskContract {
+  return store.transact(() => {
+    const receipt = store.getC2CDelegationIntentForDispatch(dispatchRunId);
+    if (!receipt) {
+      throw new DomainError(
+        'ILLEGAL_TRANSITION',
+        `Dispatch ${dispatchRunId} is not an authoritative C2C delegation intent`,
+        { dispatch_run_id: dispatchRunId },
+      );
+    }
+
+    const dispatch = store.getDispatchRun(dispatchRunId);
+    if (!dispatch) {
+      throw new DomainError(
+        'ILLEGAL_TRANSITION',
+        `Dispatch ${dispatchRunId} was not found`,
+        { dispatch_run_id: dispatchRunId },
+      );
+    }
+
+    const task = requireTask(store, receipt.task_id);
+    requireNoRepositoryCheckpoint(store);
+    requireRevision(task, receipt.accepted_revision);
+
+    if (task.type !== 'IMPLEMENTATION') {
+      throw new DomainError(
+        'WRONG_TASK_TYPE',
+        'C2C controlled launch currently supports IMPLEMENTATION tasks only',
+        { task_id: task.id, type: task.type },
+      );
+    }
+    if (task.status !== 'READY') {
+      throw new DomainError(
+        'ILLEGAL_TRANSITION',
+        `Cannot claim C2C dispatch while task is ${task.status}`,
+        { task_id: task.id, status: task.status, dispatch_run_id: dispatch.id },
+      );
+    }
+    if (
+      dispatch.task_id !== task.id ||
+      dispatch.status !== 'launching' ||
+      dispatch.runner_instance_id !== null
+    ) {
+      throw new DomainError(
+        'ILLEGAL_TRANSITION',
+        'C2C dispatch is no longer exclusively claimable',
+        {
+          dispatch_run_id: dispatch.id,
+          dispatch_task_id: dispatch.task_id,
+          dispatch_status: dispatch.status,
+          runner_instance_id: dispatch.runner_instance_id,
+          task_id: task.id,
+        },
+      );
+    }
+
+    requireClaimBaseline(git, {
+      repo_root: task.repo_root,
+      branch: task.branch,
+      base_commit: task.base_commit,
+    });
+    requireCheckpointBaselineIntegrity(store, task);
+
+    assertRepositoryWriterAdmission(store, task.repo_root, { currentDispatchId: dispatch.id });
+    if (isProtectedExecutionMode() && store.getRepositoryLaunchState(dispatch.id) !== 'REQUESTED') {
+      throw new DomainError('ILLEGAL_TRANSITION', 'Managed Runner has no committed physical launch request');
+    }
+
+    const running = store.getRunning();
+    if (running) {
+      throw new DomainError(
+        'TASK_ALREADY_RUNNING',
+        `Task ${running.id} is already RUNNING`,
+        { running_task_id: running.id, running_type: running.type },
+      );
+    }
+
+    const timestamp = nowIso();
+    const next: TaskContract = {
+      ...task,
+      writer_generation: task.writer_generation + WRITER_PROTOCOL_GENERATION,
+      status: 'RUNNING',
+      assignee_role: 'JUNIOR',
+      execution_instance_id: executionInstanceId,
+      revision: task.revision + 1,
+      updated_at: timestamp,
+    };
+
+    store.updateTask(next);
+    store.insertEvent({
+      task_id: next.id,
+      at: timestamp,
+      actor_role: 'JUNIOR',
+      kind: 'claimed',
+      from_status: 'READY',
+      to_status: 'RUNNING',
+      revision: next.revision,
+      detail: { execution_instance_id: executionInstanceId },
+    });
+    store.updateDispatchRun({
+      ...dispatch,
+      status: 'running',
+      runner_instance_id: executionInstanceId,
+      pid: runnerPid ?? dispatch.pid,
+      started_at: timestamp,
+      updated_at: timestamp,
+    });
+
+    return next;
+  });
+}
+
+export function failC2CDispatchBeforeClaim(
+  store: Store,
+  dispatchRunId: string,
+  errorCode: string,
+  errorDetail: string,
+): DispatchRun {
+  return store.transact(() => {
+    const receipt = store.getC2CDelegationIntentForDispatch(dispatchRunId);
+    if (!receipt) {
+      throw new DomainError(
+        'ILLEGAL_TRANSITION',
+        `Dispatch ${dispatchRunId} is not an authoritative C2C delegation intent`,
+        { dispatch_run_id: dispatchRunId },
+      );
+    }
+    const dispatch = store.getDispatchRun(dispatchRunId);
+    if (!dispatch) {
+      throw new DomainError(
+        'ILLEGAL_TRANSITION',
+        `Dispatch ${dispatchRunId} was not found`,
+        { dispatch_run_id: dispatchRunId },
+      );
+    }
+    const task = requireTask(store, receipt.task_id);
+    requireNoRepositoryCheckpoint(store);
+    requireRevision(task, receipt.accepted_revision);
+
+    if (
+      task.status !== 'READY' ||
+      dispatch.status !== 'launching' ||
+      dispatch.runner_instance_id !== null ||
+      dispatch.task_id !== task.id
+    ) {
+      throw new DomainError(
+        'ILLEGAL_TRANSITION',
+        'C2C dispatch can no longer be failed as a pre-claim launch',
+        {
+          task_id: task.id,
+          task_status: task.status,
+          dispatch_run_id: dispatch.id,
+          dispatch_status: dispatch.status,
+          runner_instance_id: dispatch.runner_instance_id,
+        },
+      );
+    }
+
+    const timestamp = nowIso();
+    const failed: DispatchRun = {
+      ...dispatch,
+      status: 'failed',
+      finished_at: timestamp,
+      error_code: errorCode,
+      error_detail: errorDetail,
+      updated_at: timestamp,
+    };
+    store.updateDispatchRun(failed);
+    return failed;
+  });
+}
+
 function typeForWorker(actor: Role): TaskType {
   if (actor === 'JUNIOR') {
     return 'IMPLEMENTATION';
@@ -394,6 +595,9 @@ export function claimNextTask(
   actor: Role,
   executionInstanceId: string,
 ): TaskContract {
+  if (isProtectedExecutionMode()) {
+    throw new DomainError('ROLE_FORBIDDEN', 'Protected execution requires a managed C2C Runner claim');
+  }
   return store.transact(() => {
     const type = typeForWorker(actor);
     requireNoRepositoryCheckpoint(store);
@@ -405,7 +609,7 @@ export function claimNextTask(
         { running_task_id: running.id, running_type: running.type },
       );
     }
-    const task = store.getNextReady(type);
+    const task = store.getNextReadyUnreserved(type);
     if (!task) {
       throw new DomainError(
         'NO_PENDING_TASK',
@@ -419,6 +623,8 @@ export function claimNextTask(
       base_commit: task.base_commit,
     });
     requireCheckpointBaselineIntegrity(store, task);
+
+    assertRepositoryWriterAdmission(store, task.repo_root);
 
     const timestamp = nowIso();
     const next: TaskContract = {
@@ -466,6 +672,22 @@ export function reportResult(
       );
     }
     const parsedResult = resultForType(task.type, input.result);
+    if (task.type === 'IMPLEMENTATION') {
+      const contradiction = completionContradiction({ ...parsedResult, outcome: input.outcome })
+        ?? completionContradiction({ ...parsedResult.evidence?.worker_reported, outcome: input.outcome });
+      if (contradiction) throw new DomainError('INVALID_PAYLOAD', contradiction);
+    }
+    const scopeRules = store.getWorkScopeRulesForTask(task.id);
+    if (scopeRules !== undefined && task.type === 'IMPLEMENTATION' && Array.isArray(parsedResult.changed_files)) {
+      const payload = implementationPayloadSchema.parse(task.payload);
+      const rejected = parsedResult.changed_files.filter((file) =>
+        !isPathAllowedByScope(file, payload.allowed_scope, payload.forbidden_scope, scopeRules));
+      if (rejected.length > 0) {
+        throw new DomainError('CHECKPOINT_SCOPE_CONFLICT', 'Work result contains changes outside the bound scope', {
+          rejected_files: rejected,
+        });
+      }
+    }
     const result = resultForType(task.type, {
       ...parsedResult,
       evidence: {
@@ -578,6 +800,8 @@ export function recoverTask(
     }
     requireSameRepository(git, task.repo_root);
 
+    assertRepositoryWritersDrained(store, task.repo_root);
+
     const timestamp = nowIso();
     const blocker = {
       reason: 'CONTEXT_STALE' as const,
@@ -630,6 +854,7 @@ export function checkpointTask(
 ): { task: TaskContract; checkpoint: TaskCheckpoint } {
   let task = requireTask(store, input.task_id);
   requireSameRepository(git, task.repo_root);
+  assertRepositoryWritersDrained(store, task.repo_root);
   let intent = store.getCheckpointForRevision(input.task_id, input.revision);
   if (intent) {
     if (intent.purpose !== input.purpose) {
@@ -696,6 +921,7 @@ export function checkpointTask(
       branch: task.branch,
       allowedScope: payload.allowed_scope,
       forbiddenScope: payload.forbidden_scope,
+      scopeRules: store.getWorkScopeRulesForTask(task.id),
       expectedChangedFiles: reportedChangedFiles,
       timestamp,
     });
@@ -719,6 +945,7 @@ export function checkpointTask(
     };
     store.transact(() => {
       requireNoRepositoryCheckpoint(store);
+      assertRepositoryWritersDrained(store, task.repo_root);
       const current = requireTask(store, task.id);
       requireRevision(current, input.revision);
       if (
@@ -997,8 +1224,8 @@ export function createDiagnosisFromCheckpoint(
 
 export function resumeTask(
   store: Store,
-  git: GitSnapshot,
-  input: ResumeTaskInput,
+  git: GitSnapshot, input: ResumeTaskInput,
+  withinTransaction?: (previous: TaskContract, next: TaskContract) => void,
 ): TaskContract {
   const existing = requireTask(store, input.task_id);
   requireNoRepositoryCheckpoint(store);
@@ -1028,6 +1255,7 @@ export function resumeTask(
         { status: task.status },
       );
     }
+    assertRepositoryWritersDrained(store, task.repo_root);
     if (checkpoint) {
       requireClaimBaseline(git, {
         repo_root: task.repo_root,
@@ -1071,6 +1299,7 @@ export function resumeTask(
         new_base_commit: next.base_commit,
       },
     });
+    withinTransaction?.(task, next);
     return next;
   });
 }
@@ -1155,5 +1384,86 @@ export function closeTask(
       detail: decision === undefined ? null : { decision },
     });
     return next;
+  });
+}
+
+// A submission binding, task, and creation event commit together. Retrying
+// after a lost response returns the same authoritative task.
+export function createTaskOnce(
+  store: Store,
+  git: GitSnapshot,
+  submissionId: string,
+  input: CreateTaskInput,
+  workerProfileId: string,
+  scopeRules?: ReadonlyArray<{ kind: 'FILE' | 'SUBTREE'; path: string }>,
+): TaskContract {
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(submissionId)) {
+    throw new DomainError('WORK_SUBMISSION_INVALID', 'Invalid submission identity');
+  }
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(workerProfileId)) {
+    throw new DomainError('WORK_SUBMISSION_INVALID', 'Invalid worker profile identity');
+  }
+  const parsed = createTaskInputSchema.parse(input);
+  if (scopeRules !== undefined) {
+    if (parsed.type !== 'IMPLEMENTATION' || scopeRules.length !== parsed.payload.allowed_scope.length
+      || scopeRules.some((rule, index) =>
+        (rule.kind !== 'FILE' && rule.kind !== 'SUBTREE')
+        || rule.path !== parsed.payload.allowed_scope[index])) {
+      throw new DomainError('WORK_SUBMISSION_INVALID', 'Explicit scope rules must match Task allowed_scope');
+    }
+  }
+  const digest = createHash('sha256')
+    .update(JSON.stringify({ repo_root: git.repoRoot, input: parsed, worker_profile_id: workerProfileId,
+      scope_rules: scopeRules }), 'utf8')
+    .digest('hex');
+
+  return store.transact(() => {
+    const existing = store.getWorkSubmission(submissionId);
+    if (existing) {
+      if (existing.input_digest !== digest) {
+        throw new DomainError('WORK_SUBMISSION_CONFLICT', 'Submission identity was used for different input');
+      }
+      const task = store.getTask(existing.task_id);
+      if (!task) {
+        throw new DomainError('SCHEMA_MISMATCH', 'Work submission refers to a missing task');
+      }
+      return task;
+    }
+
+    requireNoRepositoryCheckpoint(store);
+    requireCleanBaseline(git);
+    const timestamp = nowIso();
+    const task: TaskContract = {
+      id: randomUUID(),
+      type: parsed.type,
+      status: 'READY',
+      owner_role: 'OWNER',
+      assignee_role: null,
+      execution_instance_id: null,
+      writer_generation: WRITER_PROTOCOL_GENERATION,
+      repo_root: git.repoRoot,
+      base_commit: git.head,
+      branch: git.branch,
+      source_checkpoint: null,
+      payload: parsed.payload,
+      result: null,
+      blocker: null,
+      revision: 1,
+      created_at: timestamp,
+      updated_at: timestamp,
+    };
+    store.insertTask(task);
+    store.insertEvent({
+      task_id: task.id,
+      at: timestamp,
+      actor_role: 'OWNER',
+      kind: 'created',
+      from_status: null,
+      to_status: 'READY',
+      revision: task.revision,
+      detail: { base_commit: task.base_commit, branch: task.branch },
+    });
+    store.insertWorkSubmission(submissionId, digest, task.id, workerProfileId, timestamp, scopeRules);
+    return task;
   });
 }

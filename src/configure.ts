@@ -176,6 +176,9 @@ export type ConfigureAuthorizationEvidence = {
   owner_sddl: string;
   dacl_sddl: string;
   combined_sddl: string;
+  owner_sid: string | null;
+  dacl_present: boolean;
+  dacl_binary_base64: string | null;
   access_rules_protected: boolean;
 };
 
@@ -1168,15 +1171,18 @@ type WindowsAuthorizationDescriptor = {
   owner_sddl: string;
   dacl_sddl: string;
   combined_sddl: string;
+  owner_sid: string | null;
+  dacl_present: boolean;
+  dacl_binary_base64: string | null;
   access_rules_protected: boolean;
 };
 
 function windowsAuthorizationEvidence(descriptor: WindowsAuthorizationDescriptor): ConfigureAuthorizationEvidence {
   return {
     fingerprint: sha256(Buffer.from(JSON.stringify([
-      descriptor.owner_sddl,
-      descriptor.dacl_sddl,
-      descriptor.combined_sddl,
+      descriptor.owner_sid,
+      descriptor.dacl_present,
+      descriptor.dacl_binary_base64,
       descriptor.access_rules_protected,
     ]), 'utf8')),
     ...descriptor,
@@ -1269,7 +1275,9 @@ public static class EngineeringMcpConfigureObjectLink
         public string device { get; set; }
         public string inode { get; set; }
         public string hash { get; set; }
-        public string authorization_sddl { get; set; }
+        public string owner_sid { get; set; }
+        public bool dacl_present { get; set; }
+        public string dacl_binary_base64 { get; set; }
         public bool access_rules_protected { get; set; }
     }
 
@@ -1326,7 +1334,12 @@ public static class EngineeringMcpConfigureObjectLink
         return ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow;
     }
 
-    private static string ReadAuthorizationSddl(SafeFileHandle handle, out bool accessRulesProtected)
+    private static void ReadAuthorization(
+        SafeFileHandle handle,
+        out string ownerSid,
+        out bool daclPresent,
+        out string daclBinaryBase64,
+        out bool accessRulesProtected)
     {
         IntPtr owner;
         IntPtr group;
@@ -1349,8 +1362,19 @@ public static class EngineeringMcpConfigureObjectLink
             byte[] bytes = new byte[length];
             Marshal.Copy(descriptor, bytes, 0, checked((int)length));
             RawSecurityDescriptor raw = new RawSecurityDescriptor(bytes, 0);
+            ownerSid = raw.Owner == null ? null : raw.Owner.Value;
+            daclPresent = raw.DiscretionaryAcl != null;
+            if (daclPresent)
+            {
+                byte[] daclBytes = new byte[raw.DiscretionaryAcl.BinaryLength];
+                raw.DiscretionaryAcl.GetBinaryForm(daclBytes, 0);
+                daclBinaryBase64 = Convert.ToBase64String(daclBytes);
+            }
+            else
+            {
+                daclBinaryBase64 = null;
+            }
             accessRulesProtected = (raw.ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0;
-            return raw.GetSddlForm(AccessControlSections.Owner | AccessControlSections.Access);
         }
         finally
         {
@@ -1375,7 +1399,9 @@ public static class EngineeringMcpConfigureObjectLink
         ulong expectedDevice,
         ulong expectedInode,
         string expectedHash,
-        string expectedAuthorization,
+        string expectedOwnerSid,
+        bool expectedDaclPresent,
+        string expectedDaclBinaryBase64,
         bool expectedAccessRulesProtected)
     {
         BY_HANDLE_FILE_INFORMATION identity = GetIdentity(handle);
@@ -1384,10 +1410,21 @@ public static class EngineeringMcpConfigureObjectLink
         string actualHash = ComputeHash(stream);
         if (!String.Equals(actualHash, expectedHash, StringComparison.Ordinal))
             throw new InvalidOperationException("proposal SHA-256 changed before object-bound installation");
+        string actualOwnerSid;
+        bool actualDaclPresent;
+        string actualDaclBinaryBase64;
         bool actualAccessRulesProtected;
-        string actualAuthorization = ReadAuthorizationSddl(handle, out actualAccessRulesProtected);
-        if (!String.Equals(actualAuthorization, expectedAuthorization, StringComparison.Ordinal))
-            throw new InvalidOperationException("proposal Owner or DACL changed before object-bound installation");
+        ReadAuthorization(
+            handle,
+            out actualOwnerSid,
+            out actualDaclPresent,
+            out actualDaclBinaryBase64,
+            out actualAccessRulesProtected);
+        if (!String.Equals(actualOwnerSid, expectedOwnerSid, StringComparison.Ordinal))
+            throw new InvalidOperationException("proposal Owner changed before object-bound installation");
+        if (actualDaclPresent != expectedDaclPresent ||
+            !String.Equals(actualDaclBinaryBase64, expectedDaclBinaryBase64, StringComparison.Ordinal))
+            throw new InvalidOperationException("proposal DACL semantics changed before object-bound installation");
         if (actualAccessRulesProtected != expectedAccessRulesProtected)
             throw new InvalidOperationException("proposal DACL protection or inheritance state changed before object-bound installation");
     }
@@ -1429,11 +1466,15 @@ public static class EngineeringMcpConfigureObjectLink
         string expectedHash,
         string expectedDeviceText,
         string expectedInodeText,
-        string expectedAuthorization,
+        string expectedOwnerSidText,
+        bool expectedDaclPresent,
+        string expectedDaclBinaryBase64Text,
         bool expectedAccessRulesProtected)
     {
         ulong expectedDevice = UInt64.Parse(expectedDeviceText, System.Globalization.CultureInfo.InvariantCulture);
         ulong expectedInode = UInt64.Parse(expectedInodeText, System.Globalization.CultureInfo.InvariantCulture);
+        string expectedOwnerSid = expectedOwnerSidText.Length == 0 ? null : expectedOwnerSidText;
+        string expectedDaclBinaryBase64 = expectedDaclBinaryBase64Text.Length == 0 ? null : expectedDaclBinaryBase64Text;
         using (SafeFileHandle source = CreateFileW(
             proposalPath,
             GENERIC_READ | READ_CONTROL | SYNCHRONIZE,
@@ -1455,17 +1496,19 @@ public static class EngineeringMcpConfigureObjectLink
                 IntPtr.Zero))
             {
                 if (targetDirectory.IsInvalid) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-                Verify(source, stream, expectedDevice, expectedInode, expectedHash, expectedAuthorization, expectedAccessRulesProtected);
-                Verify(source, stream, expectedDevice, expectedInode, expectedHash, expectedAuthorization, expectedAccessRulesProtected);
+                Verify(source, stream, expectedDevice, expectedInode, expectedHash, expectedOwnerSid, expectedDaclPresent, expectedDaclBinaryBase64, expectedAccessRulesProtected);
+                Verify(source, stream, expectedDevice, expectedInode, expectedHash, expectedOwnerSid, expectedDaclPresent, expectedDaclBinaryBase64, expectedAccessRulesProtected);
                 CreateLinkFromHandle(source, targetDirectory, targetName);
-                Verify(source, stream, expectedDevice, expectedInode, expectedHash, expectedAuthorization, expectedAccessRulesProtected);
+                Verify(source, stream, expectedDevice, expectedInode, expectedHash, expectedOwnerSid, expectedDaclPresent, expectedDaclBinaryBase64, expectedAccessRulesProtected);
                 BY_HANDLE_FILE_INFORMATION finalIdentity = GetIdentity(source);
                 return new Result
                 {
                     device = finalIdentity.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     inode = FileIndex(finalIdentity).ToString(System.Globalization.CultureInfo.InvariantCulture),
                     hash = expectedHash,
-                    authorization_sddl = expectedAuthorization,
+                    owner_sid = expectedOwnerSid,
+                    dacl_present = expectedDaclPresent,
+                    dacl_binary_base64 = expectedDaclBinaryBase64,
                     access_rules_protected = expectedAccessRulesProtected
                 };
             }
@@ -1478,7 +1521,9 @@ type WindowsObjectBoundLinkResult = {
   device: string;
   inode: string;
   hash: string;
-  authorization_sddl: string;
+  owner_sid: string | null;
+  dacl_present: boolean;
+  dacl_binary_base64: string | null;
   access_rules_protected: boolean;
 };
 
@@ -1499,9 +1544,11 @@ function createWindowsObjectBoundLink(
     "$expectedHash=[Environment]::GetEnvironmentVariable('ENGINEERING_MCP_OBJECT_LINK_HASH','Process')",
     "$expectedDevice=[Environment]::GetEnvironmentVariable('ENGINEERING_MCP_OBJECT_LINK_DEVICE','Process')",
     "$expectedInode=[Environment]::GetEnvironmentVariable('ENGINEERING_MCP_OBJECT_LINK_INODE','Process')",
-    "$authorization=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Environment]::GetEnvironmentVariable('ENGINEERING_MCP_OBJECT_LINK_AUTHORIZATION','Process')))",
+    "$ownerSid=[Environment]::GetEnvironmentVariable('ENGINEERING_MCP_OBJECT_LINK_OWNER_SID','Process')",
+    "$daclPresent=[bool]::Parse([Environment]::GetEnvironmentVariable('ENGINEERING_MCP_OBJECT_LINK_DACL_PRESENT','Process'))",
+    "$daclBinary=[Environment]::GetEnvironmentVariable('ENGINEERING_MCP_OBJECT_LINK_DACL_BINARY','Process')",
     "$protected=[bool]::Parse([Environment]::GetEnvironmentVariable('ENGINEERING_MCP_OBJECT_LINK_PROTECTED','Process'))",
-    '[EngineeringMcpConfigureObjectLink]::VerifyAndLink($proposal,$targetDirectory,$targetName,$expectedHash,$expectedDevice,$expectedInode,$authorization,$protected)|ConvertTo-Json -Compress',
+    '[EngineeringMcpConfigureObjectLink]::VerifyAndLink($proposal,$targetDirectory,$targetName,$expectedHash,$expectedDevice,$expectedInode,$ownerSid,$daclPresent,$daclBinary,$protected)|ConvertTo-Json -Compress',
   ].join(';');
   const output = runWindowsPowerShell(script, {
     ENGINEERING_MCP_OBJECT_LINK_SOURCE: Buffer.from(WINDOWS_OBJECT_LINK_HELPER_CSHARP, 'utf8').toString('base64'),
@@ -1511,7 +1558,9 @@ function createWindowsObjectBoundLink(
     ENGINEERING_MCP_OBJECT_LINK_HASH: source.hash,
     ENGINEERING_MCP_OBJECT_LINK_DEVICE: source.identity.device,
     ENGINEERING_MCP_OBJECT_LINK_INODE: source.identity.inode,
-    ENGINEERING_MCP_OBJECT_LINK_AUTHORIZATION: Buffer.from(expectedAuthorization.combined_sddl, 'utf8').toString('base64'),
+    ENGINEERING_MCP_OBJECT_LINK_OWNER_SID: expectedAuthorization.owner_sid ?? '',
+    ENGINEERING_MCP_OBJECT_LINK_DACL_PRESENT: String(expectedAuthorization.dacl_present),
+    ENGINEERING_MCP_OBJECT_LINK_DACL_BINARY: expectedAuthorization.dacl_binary_base64 ?? '',
     ENGINEERING_MCP_OBJECT_LINK_PROTECTED: String(expectedAuthorization.access_rules_protected),
   });
   const result = JSON.parse(output) as WindowsObjectBoundLinkResult;
@@ -1519,7 +1568,9 @@ function createWindowsObjectBoundLink(
     result.device !== source.identity.device ||
     result.inode !== source.identity.inode ||
     result.hash !== source.hash ||
-    result.authorization_sddl !== expectedAuthorization.combined_sddl ||
+    result.owner_sid !== expectedAuthorization.owner_sid ||
+    result.dacl_present !== expectedAuthorization.dacl_present ||
+    result.dacl_binary_base64 !== expectedAuthorization.dacl_binary_base64 ||
     result.access_rules_protected !== expectedAuthorization.access_rules_protected
   ) {
     throw new Error('Windows object-bound installation returned inconsistent verification evidence');
@@ -1632,6 +1683,10 @@ function parseAuthorizationDescriptor(output: string, path: string): WindowsAuth
     typeof value.owner_sddl !== 'string' ||
     typeof value.dacl_sddl !== 'string' ||
     typeof value.combined_sddl !== 'string' ||
+    (value.owner_sid !== null && typeof value.owner_sid !== 'string') ||
+    typeof value.dacl_present !== 'boolean' ||
+    (value.dacl_binary_base64 !== null && typeof value.dacl_binary_base64 !== 'string') ||
+    value.dacl_present !== (value.dacl_binary_base64 !== null) ||
     typeof value.access_rules_protected !== 'boolean'
   ) {
     throw new Error(`Windows security descriptor output was incomplete for ${path}`);
@@ -1646,7 +1701,11 @@ function readWindowsAuthorization(path: string): WindowsAuthorizationDescriptor 
     '$access=[System.Security.AccessControl.AccessControlSections]::Access',
     '$combined=$owner -bor $access',
     '$acl=[System.IO.File]::GetAccessControl($path,$combined)',
-    '[pscustomobject]@{owner_sddl=$acl.GetSecurityDescriptorSddlForm($owner);dacl_sddl=$acl.GetSecurityDescriptorSddlForm($access);combined_sddl=$acl.GetSecurityDescriptorSddlForm($combined);access_rules_protected=$acl.AreAccessRulesProtected}|ConvertTo-Json -Compress',
+    '$raw=New-Object System.Security.AccessControl.RawSecurityDescriptor($acl.GetSecurityDescriptorBinaryForm(),0)',
+    '$ownerSid=$null;if($null -ne $raw.Owner){$ownerSid=$raw.Owner.Value}',
+    '$daclPresent=$null -ne $raw.DiscretionaryAcl',
+    '$daclBinary=$null;if($daclPresent){$daclBytes=New-Object byte[] $raw.DiscretionaryAcl.BinaryLength;$raw.DiscretionaryAcl.GetBinaryForm($daclBytes,0);$daclBinary=[Convert]::ToBase64String($daclBytes)}',
+    '[pscustomobject]@{owner_sddl=$acl.GetSecurityDescriptorSddlForm($owner);dacl_sddl=$acl.GetSecurityDescriptorSddlForm($access);combined_sddl=$acl.GetSecurityDescriptorSddlForm($combined);owner_sid=$ownerSid;dacl_present=$daclPresent;dacl_binary_base64=$daclBinary;access_rules_protected=$acl.AreAccessRulesProtected}|ConvertTo-Json -Compress',
   ].join(';');
   return parseAuthorizationDescriptor(runWindowsPowerShell(script, { ENGINEERING_MCP_ACL_PATH: path }), path);
 }
@@ -1656,9 +1715,9 @@ function sameWindowsAuthorization(
   right: WindowsAuthorizationDescriptor,
 ): boolean {
   return (
-    left.owner_sddl === right.owner_sddl &&
-    left.dacl_sddl === right.dacl_sddl &&
-    left.combined_sddl === right.combined_sddl &&
+    left.owner_sid === right.owner_sid &&
+    left.dacl_present === right.dacl_present &&
+    left.dacl_binary_base64 === right.dacl_binary_base64 &&
     left.access_rules_protected === right.access_rules_protected
   );
 }
@@ -2019,6 +2078,13 @@ function applyConfigureTransaction(
       });
     }
     return noChangeResult(prepared);
+  }
+  if (process.platform !== 'win32' && prepared.expectedSourceHash !== null) {
+    throw new ConfigureError(
+      'CONFIGURE_UNSUPPORTED',
+      'Existing configuration mutation is currently supported only on Windows; preview and semantic no-change remain available on this platform',
+      { config_path: configPath, platform: process.platform },
+    );
   }
   if (!existsSync(parent)) {
     if (!prepared.createParentOnApply) {

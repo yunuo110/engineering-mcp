@@ -4,6 +4,8 @@
 
 ### Added
 
+- A version-gated `engineering-mcp c2c-client` stdio entrypoint exposing only
+  the private `execute_c2c_plan` contract for companion integrations.
 - Safe Configure for Codex/Grok native TOML with preview-by-default plans,
   self-contained immutable preview/apply consistency identities, explicit repository
   pinning, package-proven direct/Node launcher detection, capture-then-create retained

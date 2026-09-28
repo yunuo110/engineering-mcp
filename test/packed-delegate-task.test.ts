@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -144,8 +144,8 @@ function structured(result: { structuredContent?: unknown }): Record<string, unk
   return result.structuredContent as Record<string, unknown>;
 }
 
-describe('packed public artifact delegation regression', () => {
-  it('packs, installs, initializes MCP, creates task, delegates to packaged Worker Runner, and completes', async () => {
+describe('packed public artifact standard-mode regression', () => {
+  it('packs, initializes OWNER MCP, preserves builtin stub delegation and refuses unprovisioned generic execution', async () => {
     const packDir = tempDir('eng-mcp-pack-');
     const pack = npmRun(['pack', '--json', '--pack-destination', packDir], projectRoot);
     const packOutput = JSON.parse(pack.stdout.trim()) as Array<{ filename: string }>;
@@ -243,7 +243,7 @@ describe('packed public artifact delegation regression', () => {
 
     // Packed profile-selection path: load a trusted profile registry at
     // process startup and delegate through an explicit generic profile.
-    const { profilesFile, scriptPath } = writePackedProfileFixture();
+    const { profilesFile } = writePackedProfileFixture();
     const profileTransport = new StdioClientTransport({
       command: process.execPath,
       args: [installedCli, '--role', 'owner', '--repo', repo, '--db', dbPath, '--worker-profiles', profilesFile],
@@ -297,36 +297,50 @@ describe('packed public artifact delegation regression', () => {
       expect(delegated.isError).toBeFalsy();
       const delegatedBody = structured(delegated);
       expect(delegatedBody.ok).toBe(true);
-      const profileRun = delegatedBody.dispatch_run as { status: string; adapter_id: string; worker_profile_id: string };
-      const profileTaskResult = delegatedBody.task as { status: string };
-      expect(profileRun.status).toBe('completed');
+      const profileRun = delegatedBody.dispatch_run as { status: string; adapter_id: string; worker_profile_id: string; error_code: string };
+      const profileTaskResult = delegatedBody.task as { status: string; blocker: { summary: string } };
+      expect(profileRun.status).toBe('blocked');
       expect(profileRun.adapter_id).toBe('generic-cli');
       expect(profileRun.worker_profile_id).toBe('packed-generic');
-      expect(profileTaskResult.status).toBe('COMPLETED');
+      expect(profileRun.error_code).toBe('WORKER_PROCESS_FAILED');
+      expect(profileTaskResult.status).toBe('BLOCKED');
+      expect(profileTaskResult.blocker.summary).toContain('WORKER_IDENTITY_REFUSED:not provisioned');
+      expect(existsSync(join(repo, 'hello.txt'))).toBe(false);
 
-      // The installed runner must enforce scope even when Git ignores the write
-      // and the real child Harness reports no changed filenames.
+      // The installed runner's scope check remains covered with a trusted
+      // in-process fixture; this is not a Worker-SID or public execution proof.
       writeFileSync(join(repo, '.gitignore'), 'secret.env\n');
-      git(repo, ['add', '--', 'hello.txt', '.gitignore']);
+      git(repo, ['add', '--', '.gitignore']);
       git(repo, ['commit', '-m', 'baseline for ignored-file packaged regression']);
-      writeFileSync(scriptPath, `const fs = require('node:fs');
-process.stdin.resume();
-process.stdin.on('end', () => {
-  fs.writeFileSync('secret.env', 'ignored forbidden write');
-  console.log(JSON.stringify({ protocol: 'engineering-worker/1', outcome: 'completed', summary: 'claims success', changed_files: [], validation: [], known_limitations: [], exit_code: 0 }));
-});
-`);
       const ignoredCreated = await profileClient.callTool({ name: 'create_task', arguments: {
         type: 'IMPLEMENTATION', payload: { goal: 'Work only in safe', parent_intent: 'ignored-file packed regression',
           allowed_scope: ['safe'], forbidden_scope: ['secret.env'], acceptance_criteria: [], validation_requirements: [],
           context_files: [], knowledge_refs: [], parent_risk: 'L1' },
       } });
       const ignoredTask = structured(ignoredCreated).task as { id: string; revision: number };
-      const ignoredRun = await profileClient.callTool({ name: 'delegate_task', arguments: {
-        task_id: ignoredTask.id, revision: ignoredTask.revision, worker_profile: 'packed-generic',
-      } });
-      expect(ignoredRun.structuredContent).toMatchObject({ ok: true, task: { status: 'BLOCKED', result: null },
-        dispatch_run: { status: 'blocked', error_code: 'SCOPE_VIOLATION' } });
+      const packageRoot = join(installDir, 'node_modules', 'engineering-mcp-cli', 'dist');
+      const installedStore = await import(pathToFileURL(join(packageRoot, 'store.js')).href);
+      const installedGit = await import(pathToFileURL(join(packageRoot, 'git.js')).href);
+      const installedDispatcher = await import(pathToFileURL(join(packageRoot, 'orchestration', 'dispatcher.js')).href);
+      const scopeStore = installedStore.Store.open(dbPath, { repoRoot: repo });
+      try {
+        const ignoredRun = await installedDispatcher.delegateTask(
+          scopeStore, installedGit.inspectRepo(repo), ignoredTask.id, ignoredTask.revision,
+          { adapterId: 'generic-cli', workerProfileId: 'packed-generic', inProcess: true,
+            executionInstanceId: 'packed-scope-fixture', adapter: {
+              id: 'generic-cli', async probe() {}, async execute(context: { repositoryRoot: string }) {
+                writeFileSync(join(context.repositoryRoot, 'secret.env'), 'ignored forbidden write');
+                return { outcome: 'completed', summary: 'claims success', changed_files: [],
+                  validation: [], known_limitations: [], exit_code: 0 };
+              },
+            } },
+        );
+        expect(ignoredRun.status).toBe('blocked');
+        expect(ignoredRun.error_code).toBe('SCOPE_VIOLATION');
+        expect(scopeStore.getTask(ignoredTask.id)).toMatchObject({ status: 'BLOCKED', result: null });
+      } finally {
+        scopeStore.close();
+      }
     } finally {
       await profileClient.close();
       await profileTransport.close();

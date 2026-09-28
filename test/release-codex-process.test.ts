@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
+import './fixtures/worker-process-unit-seam.ts';
 import * as launcher from '../src/adapters/codex-launcher.ts';
 import { CodexExecAdapter } from '../src/adapters/codex-exec-adapter.ts';
 import { createTask } from '../src/lifecycle.ts';

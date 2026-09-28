@@ -1,6 +1,7 @@
 import { writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import './fixtures/worker-process-unit-seam.ts';
 import { cancelTask, createTask } from '../src/lifecycle.ts';
 import { delegateTask } from '../src/orchestration/dispatcher.ts';
 import { GenericCliAdapter } from '../src/adapters/generic-cli-adapter.ts';

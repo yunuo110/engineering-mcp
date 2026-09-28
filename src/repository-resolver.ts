@@ -1,6 +1,6 @@
-import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { DomainError } from './errors.ts';
+import { runAuthorityGit } from './trusted-git.ts';
 
 export type RepositorySource = 'explicit-arg' | 'environment' | 'cwd-git';
 
@@ -11,11 +11,7 @@ export type RepositoryResolution = {
 
 function gitTopLevel(candidate: string): string {
   try {
-    const root = execFileSync('git', ['-C', candidate, 'rev-parse', '--show-toplevel'], {
-      encoding: 'utf8',
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
+    const root = runAuthorityGit(candidate, ['rev-parse', '--show-toplevel']).trim();
     return realpathSync(root);
   } catch {
     throw new DomainError(

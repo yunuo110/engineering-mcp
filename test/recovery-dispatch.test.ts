@@ -21,7 +21,7 @@ afterEach(() => {
 
 const crashFixture = fileURLToPath(new URL('./fixtures/worker-runner-fixture.ts', import.meta.url));
 
-function spawnCrashRunner(repo: string, dbPath: string, taskId: string, revision: number): Promise<number | null> {
+function spawnCrashRunner(repo: string, dbPath: string, taskId: string, revision: number, dispatchId: string): Promise<number | null> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [
       crashFixture,
@@ -34,7 +34,7 @@ function spawnCrashRunner(repo: string, dbPath: string, taskId: string, revision
       '--revision',
       String(revision),
       '--dispatch',
-      'irrelevant',
+      dispatchId,
       '--mode',
       'crash-after-claim',
     ], { cwd: fileURLToPath(new URL('..', import.meta.url)), shell: false, windowsHide: true });
@@ -58,7 +58,7 @@ function testStore(repo: string): Store {
   return opened.store;
 }
 
-function orphanDispatch(taskId: string, id: string, store: Store): void {
+function launchingDispatch(taskId: string, id: string, store: Store): void {
   const now = new Date().toISOString();
   store.insertDispatchRun({
     id,
@@ -66,9 +66,9 @@ function orphanDispatch(taskId: string, id: string, store: Store): void {
     worker_role: 'JUNIOR',
     adapter_id: 'orphan-adapter',
     worker_profile_id: null,
-    runner_instance_id: 'dead-runner',
-    pid: 999,
-    status: 'running',
+    runner_instance_id: null,
+    pid: null,
+    status: 'launching',
     started_at: now,
     finished_at: null,
     exit_code: null,
@@ -86,14 +86,14 @@ describe('dispatch reconciliation on explicit OWNER recovery and cancel', () => 
     const db = testStore(repo);
     const git = snapshot(repo);
     const task = createTask(db, git, { type: 'IMPLEMENTATION', payload: implPayload });
+    launchingDispatch(task.id, 'orphan-dispatch', db);
 
     // Real child claims and exits before report; no parent close handler survives.
-    const code = await spawnCrashRunner(repo, db.path, task.id, task.revision);
+    const code = await spawnCrashRunner(repo, db.path, task.id, task.revision, 'orphan-dispatch');
     expect(code).toBe(9);
 
     const running = db.getTask(task.id);
     expect(running?.status).toBe('RUNNING');
-    orphanDispatch(task.id, 'orphan-dispatch', db);
     const oldActive = db.getActiveDispatchForTask(task.id);
     expect(oldActive?.status).toBe('running');
 
@@ -124,11 +124,11 @@ describe('dispatch reconciliation on explicit OWNER recovery and cancel', () => 
     const db = testStore(repo);
     const git = snapshot(repo);
     const task = createTask(db, git, { type: 'IMPLEMENTATION', payload: implPayload });
-    const code = await spawnCrashRunner(repo, db.path, task.id, task.revision);
+    launchingDispatch(task.id, 'cancel-dispatch', db);
+    const code = await spawnCrashRunner(repo, db.path, task.id, task.revision, 'cancel-dispatch');
     expect(code).toBe(9);
     const running = db.getTask(task.id);
     expect(running?.status).toBe('RUNNING');
-    orphanDispatch(task.id, 'cancel-dispatch', db);
 
     const cancelled = cancelTask(db, task.id, running?.revision ?? 0, 'owner cancel');
     expect(cancelled.status).toBe('CANCELLED');

@@ -1,10 +1,10 @@
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { DomainError } from './errors.ts';
 import { isPathAllowedByScope } from './scope.ts';
+import { runAuthorityGit } from './trusted-git.ts';
 import type { GitSnapshot } from './types.ts';
 
 function runGitRaw(
@@ -13,13 +13,7 @@ function runGitRaw(
   options?: { env?: NodeJS.ProcessEnv; allowedStatuses?: readonly number[] },
 ): { output: string; status: number } {
   try {
-    const output = execFileSync('git', ['-C', repo, ...args], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-      env: options?.env,
-      maxBuffer: 64 * 1024 * 1024,
-    });
+    const output = runAuthorityGit(repo, args, options?.env);
     return { output, status: 0 };
   } catch (error) {
     const err = error as { status?: number; stderr?: string; message?: string };
@@ -97,6 +91,7 @@ export type GitCheckpointPlan = {
   requestIdentity: string;
   allowedScope: string[];
   forbiddenScope: string[];
+  scopeRules?: ReadonlyArray<{ kind: 'FILE' | 'SUBTREE'; path: string }>;
   expectedChangedFiles?: string[];
   timestamp: string;
   message: string;
@@ -124,9 +119,10 @@ function requireCheckpointScope(
   files: readonly string[],
   allowedScope: readonly string[],
   forbiddenScope: readonly string[],
+  scopeRules?: ReadonlyArray<{ kind: 'FILE' | 'SUBTREE'; path: string }>,
 ): void {
   const rejected = files.filter((file) => {
-    return !isPathAllowedByScope(file, allowedScope, forbiddenScope);
+    return !isPathAllowedByScope(file, allowedScope, forbiddenScope, scopeRules);
   });
   if (rejected.length > 0) {
     throw new DomainError(
@@ -207,7 +203,7 @@ function buildWorktreeTree(repo: string, baseCommit: string, isolateObjects: boo
 } {
   const tempDir = mkdtempSync(join(tmpdir(), 'engineering-mcp-checkpoint-'));
   const indexPath = join(tempDir, 'index');
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_INDEX_FILE: indexPath };
+  const env: NodeJS.ProcessEnv = { GIT_INDEX_FILE: indexPath };
   if (isolateObjects) {
     const objectDir = join(tempDir, 'objects');
     mkdirSync(join(objectDir, 'info'), { recursive: true });
@@ -250,6 +246,7 @@ export function planGitCheckpoint(repo: string, input: {
   branch: string;
   allowedScope: string[];
   forbiddenScope: string[];
+  scopeRules?: ReadonlyArray<{ kind: 'FILE' | 'SUBTREE'; path: string }>;
   expectedChangedFiles?: string[];
   timestamp: string;
 }): GitCheckpointPlan {
@@ -272,13 +269,14 @@ export function planGitCheckpoint(repo: string, input: {
   if (worktree.changedFiles.length === 0) {
     throw new DomainError('CHECKPOINT_NOTHING_TO_SAVE', 'Working tree has no checkpointable changes');
   }
-  requireCheckpointScope(worktree.changedFiles, input.allowedScope, input.forbiddenScope);
+  requireCheckpointScope(worktree.changedFiles, input.allowedScope, input.forbiddenScope, input.scopeRules);
   requireExpectedChangesCaptured(worktree.changedFiles, input.expectedChangedFiles);
   const scopeIdentity = stableHash({
     allowed_scope: [...input.allowedScope].sort(),
     forbidden_scope: [...input.forbiddenScope].sort(),
     expected_changed_files: input.expectedChangedFiles ? [...input.expectedChangedFiles].sort() : null,
     changed_files: worktree.changedFiles,
+    ...(input.scopeRules === undefined ? {} : { scope_rules: input.scopeRules }),
   });
   const checkpointRef = checkpointRefFor(input.taskId, input.producerRevision);
   const requestIdentity = stableHash({
@@ -341,7 +339,6 @@ export function applyGitCheckpoint(
   const actual = buildWorktreeTree(repo, plan.priorBaseCommit, false);
   requirePlanMatches(plan, actual);
   const env = {
-    ...process.env,
     GIT_AUTHOR_NAME: 'Engineering MCP',
     GIT_AUTHOR_EMAIL: 'engineering-mcp@local',
     GIT_COMMITTER_NAME: 'Engineering MCP',

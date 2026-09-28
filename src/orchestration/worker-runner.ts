@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, lstatSync, openSync, readlinkSync, readSync } from 'node:fs';
 import { join } from 'node:path';
@@ -9,6 +8,8 @@ import type { Store } from '../store.ts';
 import type { GitSnapshot, RunnerObservedEvidence, TaskContract } from '../types.ts';
 import { workerResultSchema } from './types.ts';
 import type { WorkerAdapter, WorkerResult } from './types.ts';
+import { waitAtTestProcessGate } from './v2-process-trace.ts';
+import { runAuthorityGit } from '../trusted-git.ts';
 
 export type RunnerInput = {
   store: Store;
@@ -25,9 +26,7 @@ function ignoredFileSnapshot(repo: string): Map<string, string> {
   // Do not prune caches or paths outside allowed_scope: their mutations must also
   // obey scope. Hash content rather than timestamps so unchanged artifacts are
   // not reported and a same-size edit with restored timestamps is still observed.
-  const ignored = execFileSync('git', ['-C', repo, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z'], {
-    encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024,
-  });
+  const ignored = runAuthorityGit(repo, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z']);
   const snapshot = new Map<string, string>();
   const buffer = Buffer.allocUnsafe(64 * 1024);
   for (const file of ignored.split('\0')) {
@@ -58,10 +57,14 @@ function ignoredFileSnapshot(repo: string): Map<string, string> {
   return snapshot;
 }
 
-function isAllowedFile(task: TaskContract, file: string): boolean {
+function isAllowedFile(
+  task: TaskContract,
+  file: string,
+  scopeRules?: ReadonlyArray<{ kind: 'FILE' | 'SUBTREE'; path: string }>,
+): boolean {
   if (task.type !== 'IMPLEMENTATION') return false;
   const { allowed_scope, forbidden_scope } = task.payload as { allowed_scope: string[]; forbidden_scope: string[] };
-  return isPathAllowedByScope(file, allowed_scope, forbidden_scope);
+  return isPathAllowedByScope(file, allowed_scope, forbidden_scope, scopeRules);
 }
 
 function resultForWorker(task: TaskContract, result: WorkerResult, git: GitSnapshot, observedChangedFiles: string[]) {
@@ -97,7 +100,7 @@ function blockerForError(result: WorkerResult, errorCode: string | null, git: Gi
       ? 'SCOPE_CONFLICT'
       : errorCode === 'UNEXPECTED_HEAD_CHANGE'
         ? 'REPOSITORY_DIVERGED'
-        : errorCode === 'WORKER_PROCESS_FAILED' || errorCode === 'WORKER_PROTOCOL_FAILURE'
+        : errorCode === 'WORKER_PROCESS_FAILED' || errorCode === 'WORKER_PROTOCOL_FAILURE' || errorCode === 'CODEX_ARTIFACT_MISMATCH' || errorCode === 'CODEX_PROCESS_FAILED'
           ? 'TOOL_FAILURE'
           : undefined;
   const reason = authoritativeReason ?? result.blocker_classification ?? 'OTHER';
@@ -124,8 +127,13 @@ function blockerForError(result: WorkerResult, errorCode: string | null, git: Gi
   };
 }
 
-function runnerObserved(git: GitSnapshot, changedFiles: string[], task: TaskContract): RunnerObservedEvidence {
-  const rejected = changedFiles.filter((file) => !isAllowedFile(task, file)).sort();
+function runnerObserved(
+  git: GitSnapshot,
+  changedFiles: string[],
+  task: TaskContract,
+  scopeRules?: ReadonlyArray<{ kind: 'FILE' | 'SUBTREE'; path: string }>,
+): RunnerObservedEvidence {
+  const rejected = changedFiles.filter((file) => !isAllowedFile(task, file, scopeRules)).sort();
   return {
     changed_files: [...changedFiles].sort(),
     git: {
@@ -173,6 +181,14 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
       updated_at: new Date().toISOString(),
     },
   );
+  return await runClaimedWorkerExecution(input, claimed);
+}
+
+export async function runClaimedWorkerExecution(
+  input: RunnerInput,
+  claimed: TaskContract,
+): Promise<TaskContract> {
+  const scopeRules = input.store.getWorkScopeRulesForTask(claimed.id);
   // Snapshot after our claim transaction, so an ignored in-repository ledger
   // does not make the runner's own bookkeeping look like a worker mutation.
   const ignoredBefore = ignoredFileSnapshot(input.git.repoRoot);
@@ -184,7 +200,7 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
       dispatchRunId: input.dispatchRunId,
       taskId: input.taskId,
       repositoryRoot: input.git.repoRoot,
-      baseCommit: taskBefore.base_commit,
+      baseCommit: claimed.base_commit,
       task: claimed,
     });
   } catch (error) {
@@ -219,6 +235,8 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
     }
   }
 
+  await waitAtTestProcessGate('before_report');
+
   const repoAfter = inspectRepo(input.git.repoRoot);
   const changed = new Set(changedFilesFromRepo(input.git.repoRoot));
   const ignoredAfter = ignoredFileSnapshot(input.git.repoRoot);
@@ -234,8 +252,8 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
       errorCode = 'UNEXPECTED_HEAD_CHANGE';
       workerResult.outcome = 'blocked';
       workerResult.blocked_reason = 'UNEXPECTED_HEAD_CHANGE';
-    } else if (changedFiles.some((file) => !isAllowedFile(claimed, file))) {
-      const outOfScope = changedFiles.filter((file) => !isAllowedFile(claimed, file));
+    } else if (changedFiles.some((file) => !isAllowedFile(claimed, file, scopeRules))) {
+      const outOfScope = changedFiles.filter((file) => !isAllowedFile(claimed, file, scopeRules));
       errorCode = 'SCOPE_VIOLATION';
       workerResult.outcome = 'blocked';
       workerResult.blocked_reason = `SCOPE_VIOLATION: ${outOfScope.join(', ')}`;
@@ -265,7 +283,7 @@ export async function runWorkerRunner(input: RunnerInput): Promise<TaskContract>
     updated_at: timestamp,
   };
   let terminal: TaskContract;
-  const observed = runnerObserved(repoAfter, changedFiles, claimed);
+  const observed = runnerObserved(repoAfter, changedFiles, claimed, scopeRules);
   if (workerResult && workerResult.outcome === 'completed' && errorCode === null) {
     terminal = reportResult(input.store, 'JUNIOR', input.executionInstanceId, {
       task_id: claimed.id,

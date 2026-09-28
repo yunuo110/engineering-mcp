@@ -7,6 +7,7 @@ import {
   type TaskContract,
 } from '../types.ts';
 import type { WorkerResult } from '../orchestration/types.ts';
+import { completionContradiction } from '../result-consistency.ts';
 
 export const EWP_PROTOCOL = 'engineering-worker/1';
 
@@ -55,7 +56,10 @@ export const ewpResultSchema = z.object({
   git: gitEvidenceSchema.optional(),
   environment: environmentEvidenceSchema.optional(),
   exit_code: z.number().int().nonnegative(),
-}).strict();
+}).strict().superRefine((value, context) => {
+  const message = completionContradiction(value);
+  if (message) context.addIssue({ code: 'custom', message });
+});
 
 export type EwpResult = z.infer<typeof ewpResultSchema>;
 

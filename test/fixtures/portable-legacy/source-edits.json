@@ -1,0 +1,145 @@
+{
+  "schema": "engineering-ingress-reviewed-text-edits/1",
+  "edits": [
+    {
+      "path": "src/McpChild.cs",
+      "old": "public bool StartupRecordSeen {get;private set;}",
+      "new": "public bool StartupRecordSeen {get;private set;}\n    public bool Exited {get{return child!=null && child.HasExited;}}"
+    },
+    {
+      "path": "src/WindowsBoundary.cs",
+      "old": "    public static string ProcessSid(Process p) {",
+      "new": "    public static void RequireFileReadDenied(string path) {\n        // Probe access only. Never read or copy credential bytes.\n        var h=CreateFile(path,0x80000000,7,IntPtr.Zero,3,0,IntPtr.Zero);\n        if(!h.IsInvalid){h.Dispose();throw new GateException(\"CONTROLLER_CAN_READ_BRIDGE_SECRET\");}\n        int error=Marshal.GetLastWin32Error();h.Dispose();\n        if(error!=5)throw new GateException(\"SECRET_ACCESS_DENIAL_UNPROVEN_\"+error);\n    }\n    public static string ProcessSid(Process p) {"
+    },
+    {
+      "path": "src/ReleaseGuard.cs",
+      "old": "        var git=@\"C:\\Program Files\\Git\\cmd\\git.exe\";PlainPath(git);",
+      "new": "        WindowsBoundary.RequireFileReadDenied(@\"C:\\FixtureRoot\\denied-secret.xml\");\n        var git=@\"C:\\Program Files\\Git\\cmd\\git.exe\";PlainPath(git);"
+    },
+    {
+      "path": "src/ReleaseGuard.cs",
+      "old": "    public static async Task Preflight(){",
+      "new": "    static async Task<string> Step(string name,string exe,string[] args,string cwd){\n        try{return await FixedCheck(exe,args,cwd);}catch{throw new GateException(name+\"_PREFLIGHT_FAILED\");}\n    }\n    public static async Task Preflight(){"
+    },
+    {
+      "path": "src/ReleaseGuard.cs",
+      "old": "await FixedCheck(git,new[]{\"-C\",Bindings.Repo,\"rev-parse\",\"--show-toplevel\"}",
+      "new": "await Step(\"GIT_TOPLEVEL\",git,new[]{\"-C\",Bindings.Repo,\"rev-parse\",\"--show-toplevel\"}"
+    },
+    {
+      "path": "src/ReleaseGuard.cs",
+      "old": "await FixedCheck(git,new[]{\"-C\",Bindings.Repo,\"rev-parse\",\"HEAD\"}",
+      "new": "await Step(\"GIT_HEAD\",git,new[]{\"-C\",Bindings.Repo,\"rev-parse\",\"HEAD\"}"
+    },
+    {
+      "path": "src/ReleaseGuard.cs",
+      "old": "await FixedCheck(git,new[]{\"-C\",Bindings.Repo,\"status\",\"--porcelain=v1\"}",
+      "new": "await Step(\"GIT_STATUS\",git,new[]{\"-C\",Bindings.Repo,\"status\",\"--porcelain=v1\"}"
+    },
+    {
+      "path": "src/ReleaseGuard.cs",
+      "old": "await FixedCheck(Bindings.Node,new[]{\"--no-warnings\",Path.Combine(location,\"ledger-preflight.mjs\")}",
+      "new": "await Step(\"LEDGER\",Bindings.Node,new[]{\"--no-warnings\",Path.Combine(location,\"ledger-preflight.mjs\")}"
+    },
+    {
+      "path": "bridge/c2c-forwarding.mjs",
+      "old": "let child, captured = '', size = 0, settled = false;",
+      "new": "let child, captured = [], size = 0, settled = false;"
+    },
+    {
+      "path": "bridge/c2c-forwarding.mjs",
+      "old": "captured += b.toString('utf8');",
+      "new": "captured.push(b);"
+    },
+    {
+      "path": "bridge/c2c-forwarding.mjs",
+      "old": "child.on('close', () => { try { finish(responseEnvelope(captured)); } catch { finish(uncertain()); } });",
+      "new": "child.on('close', (code) => { try { if (code !== 0 && code !== 2) throw Error();\n        finish(responseEnvelope(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(captured))));\n      } catch { finish(uncertain()); } });"
+    },
+    {
+      "path": "ops/ledger-preflight.mjs",
+      "old": "existsSync, lstatSync, realpathSync",
+      "new": "existsSync, lstatSync, realpathSync, statSync"
+    },
+    {
+      "path": "ops/ledger-preflight.mjs",
+      "old": "console.log(JSON.stringify({status:'PASS',...actual}));",
+      "new": "const identity=statSync(dbPath,{bigint:true});\n    console.log(JSON.stringify({status:'PASS',...actual,canonical_db_path:dbPath,file_identity:{device:identity.dev.toString(),file_index:identity.ino.toString()}}));"
+    },
+    {
+      "path": "tests/Tests.cs",
+      "old": "   if(args.Length>0 && args[0]==\"fake\")",
+      "new": "   if(args.Length==5 && args[0]==\"controller-smoke\"){\n    var launch=ReleaseGuard.StartInfo(args[1],new[]{args[2],\"--role\",\"owner\",\"--repo\",args[3],\"--db\",args[4],\"--enable-c2c-controller\"},args[3]);\n    using(var client=new McpChild()){\n     client.Start(launch,WindowsBoundary.Sid(),10000).GetAwaiter().GetResult();\n     var result=Json.Obj(client.Execute(Request(),10000).GetAwaiter().GetResult());\n     Assert((string)result[\"status\"]==\"CONTROLLER_RESULT\");var value=Json.Obj(result[\"result\"]);\n     Assert(false.Equals(value[\"ok\"]) && (string)Json.Obj(value[\"error\"])[\"code\"]==\"TASK_MISMATCH\");\n     Console.WriteLine(Json.Dump(Json.D(\"status\",\"PASS\",\"outcome\",\"TASK_MISMATCH\",\"actual_sid\",WindowsBoundary.Sid(),\"tool_count\",client.Tools.Length,\"controller_calls\",1,\"production_ledger_access\",0,\"model_calls\",0)));\n    }return 0;\n   }\n   if(args.Length>0 && args[0]==\"fake\")"
+    },
+    {
+      "path": "src/McpChild.cs",
+      "old": "        }catch{Fail(new GateException(\"CHILD_PROTOCOL_OR_EXIT\"));}",
+      "new": "        }catch(Exception e){Fail(e is GateException ? e : new GateException(\"CHILD_PROTOCOL_OR_EXIT\"));}"
+    },
+    {
+      "path": "src/Wire.cs",
+      "old": "Parse(byte[] bytes, int limit=131072)",
+      "new": "Parse(byte[] bytes, int limit=131072, int maximumDepth=16)"
+    },
+    {
+      "path": "src/Wire.cs",
+      "old": "var text=Utf8.GetString(bytes); new Lex(text).Check();",
+      "new": "if(maximumDepth<1 || maximumDepth>64)throw new GateException(\"JSON_DEPTH_LIMIT\");\n        var text=Utf8.GetString(bytes); new Lex(text,maximumDepth).Check();"
+    },
+    {
+      "path": "src/Wire.cs",
+      "old": "MaxJsonLength=limit, RecursionLimit=20",
+      "new": "MaxJsonLength=limit, RecursionLimit=maximumDepth+4"
+    },
+    {
+      "path": "src/Wire.cs",
+      "old": "readonly string s; int p; public Lex(string v){s=v;}",
+      "new": "readonly string s; readonly int maximumDepth; int p; public Lex(string v,int maximum){s=v;maximumDepth=maximum;}"
+    },
+    {
+      "path": "src/Wire.cs",
+      "old": "if(depth>16 || p>=s.Length)",
+      "new": "if(depth>maximumDepth || p>=s.Length)"
+    },
+    {
+      "path": "src/McpChild.cs",
+      "old": "Json.Parse(line.ToArray(),2*1024*1024)",
+      "new": "Json.Parse(line.ToArray(),2*1024*1024,64)"
+    },
+    {
+      "path": "tests/Tests.cs",
+      "old": "  Check(\"correct tool surface\",()=>Wire.ToolSurface(Json.Parse(Json.Bytes(Surface()))));",
+      "new": "  Check(\"external recursive JSON remains capped\",()=>Reject(()=>Json.Parse(Json.Utf8.GetBytes(new string('[',20)+\"0\"+new string(']',20)))));\n  Check(\"private trusted MCP schema supports deeper nesting\",()=>Json.Parse(Json.Utf8.GetBytes(new string('[',20)+\"0\"+new string(']',20)),Wire.BodyMax,64));\n  Check(\"private MCP depth is still bounded\",()=>Reject(()=>Json.Parse(Json.Utf8.GetBytes(new string('[',65)+\"0\"+new string(']',65)),Wire.BodyMax,64)));\n  Check(\"correct tool surface\",()=>Wire.ToolSurface(Json.Parse(Json.Bytes(Surface()))));"
+    },
+    {
+      "path": "ops/ledger-preflight.mjs",
+      "old": "import { DatabaseSync } from 'node:sqlite';",
+      "new": "import { DatabaseSync } from 'node:sqlite';\nimport { pathToFileURL } from 'node:url';"
+    },
+    {
+      "path": "ops/ledger-preflight.mjs",
+      "old": "try {\n  if (process.argv.length",
+      "new": "export function resultEnvelope(actual, identity) {\n  return {status:'PASS',ledger:actual,canonical_db_path:dbPath,file_identity:identity};\n}\nif (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {\ntry {\n  if (process.argv.length"
+    },
+    {
+      "path": "ops/ledger-preflight.mjs",
+      "old": "console.log(JSON.stringify({status:'PASS',...actual,canonical_db_path:dbPath,file_identity:{device:identity.dev.toString(),file_index:identity.ino.toString()}}));",
+      "new": "console.log(JSON.stringify(resultEnvelope(actual,{device:identity.dev.toString(),file_index:identity.ino.toString()})));"
+    },
+    {
+      "path": "ops/ledger-preflight.mjs",
+      "old": "process.exitCode=2;}\n",
+      "new": "process.exitCode=2;}\n}\n"
+    },
+    {
+      "path": "src/WindowsBoundary.cs",
+      "old": "        return \"O:\"+controller+\"G:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;\"+controller+\")(A;;0x00120003;;;\"+bridge+\")\";",
+      "new": "        return \"O:\"+controller+\"G:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;\"+controller+\")(A;;0x00120083;;;\"+bridge+\")\";"
+    },
+    {
+      "path": "tests/Tests.cs",
+      "old": "  Check(\"explicit pipe DACL is least data rights\",()=>{var sd=new RawSecurityDescriptor(WindowsBoundary.Sddl(sid,other));WindowsBoundary.CheckDescriptor(sd,sid,other);var ace=(CommonAce)sd.DiscretionaryAcl[3];Assert(ace.AccessMask==0x120003 && (ace.AccessMask&4)==0);});",
+      "new": "  Check(\"explicit pipe DACL is least client-compatible rights\",()=>{var sd=new RawSecurityDescriptor(WindowsBoundary.Sddl(sid,other));WindowsBoundary.CheckDescriptor(sd,sid,other);var ace=(CommonAce)sd.DiscretionaryAcl[3];Assert(WindowsBoundary.ClientAccess==0x120003 && ace.AccessMask==0x120083 && (ace.AccessMask&4)==0 && (ace.AccessMask&0x80)!=0);});"
+    }
+  ]
+}

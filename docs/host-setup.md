@@ -93,6 +93,16 @@ Apply the reviewed plan explicitly:
 engineering-mcp configure --apply --plan <preview-identity>
 ```
 
+Current apply support is intentionally capability-bounded:
+
+- **Windows:** preview, semantic no-change, first install, and full existing-config
+  Safe Configure capture/recovery are supported.
+- **Linux/macOS:** preview and semantic no-change are supported. First install remains
+  supported when same-directory hard-link create-if-absent capability succeeds. An
+  existing config that requires mutation fails early with `CONFIGURE_UNSUPPORTED`,
+  before proposal/backup/probe transaction artifacts are created and without changing
+  the target pathname or bytes.
+
 The identity embeds an immutable plan plus a corruption checksum. It binds the plan
 id, host, resolved target, canonical repository, source hash/missing state,
 proposed-content hash, preview timestamp, command, and complete arguments. Apply
@@ -106,13 +116,13 @@ authorization credential: the current OS user's filesystem permission to the tar
 configuration is the authorization boundary. Possession or editing of a plan does not
 grant filesystem access.
 
-For an existing file, apply first prepares and validates proposed bytes in a unique
+On Windows, an existing-file mutation first prepares and validates proposed bytes in a unique
 same-directory artifact. It then atomically moves the current target to a unique,
 unpublished transaction backup name without overwrite, verifies the captured bytes,
 and installs the proposal by creating a hard link at the now-absent target path. Hard
 link creation is atomic create-if-absent: if another writer recreates the target, it is
-preserved and apply fails closed. A missing target uses the same create-if-absent
-installation. Filesystems without the required primitive are rejected before capture.
+preserved and apply fails closed. A missing target uses create-if-absent installation
+on every supported platform; filesystems without the required hard-link primitive are rejected before publication.
 
 On Windows, an existing target's Owner and DACL are part of the capture contract.
 Safe Configure copies the exact Owner+Access security descriptor to the proposal and

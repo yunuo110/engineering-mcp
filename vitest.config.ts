@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
+    setupFiles: ['test/setup-development-git.ts'],
     fileParallelism: false,
     isolate: true,
     testTimeout: 30_000,

@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawnRestrictedWorker } from '../orchestration/restricted-worker-launch.ts';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AdapterContext, WorkerAdapter, WorkerResult } from '../orchestration/types.ts';
@@ -146,7 +146,7 @@ export class GenericCliAdapter implements WorkerAdapter {
     }
 
     const cwd = expandTrustedVariables(this.manifest.working_directory, vars);
-    const child = spawn(this.manifest.command, args, {
+    const child = spawnRestrictedWorker(this.manifest.command, args, {
       cwd,
       shell: false,
       windowsHide: true,
@@ -201,7 +201,7 @@ export class GenericCliAdapter implements WorkerAdapter {
     if (!success) {
       return {
         outcome: 'blocked',
-        summary: `Worker process failed: ${stderr.trim() || 'no stderr'}`,
+        summary: 'Worker process failed',
         changed_files: [],
         validation: [],
         known_limitations: [],

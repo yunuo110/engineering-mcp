@@ -99,7 +99,7 @@ describe('authoritative REVIEW handoff', () => {
     })).toThrow(/checkpoint/i);
   });
 
-  it('enforces purpose semantics for BLOCKED, resume, and diagnosis handoff', () => {
+  it('enforces BLOCKED resume checkpoint purpose against diagnosis handoff', () => {
     const blockedFixture = implementationFixture('BLOCKED');
     expect(() => checkpointTask(blockedFixture.store, snapshot(blockedFixture.repo), {
       task_id: blockedFixture.terminal.id, revision: blockedFixture.terminal.revision, purpose: 'REVIEW',
@@ -114,6 +114,9 @@ describe('authoritative REVIEW handoff', () => {
       payload: diagnosisPayload,
     })).toThrow(/checkpoint/i);
 
+  });
+
+  it('enforces completed REVIEW checkpoint purpose against resume', () => {
     const completedFixture = implementationFixture('COMPLETED');
     const reviewCheckpoint = checkpointTask(completedFixture.store, snapshot(completedFixture.repo), {
       task_id: completedFixture.terminal.id, revision: completedFixture.terminal.revision, purpose: 'REVIEW',

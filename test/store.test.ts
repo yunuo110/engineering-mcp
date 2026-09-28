@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DomainError } from '../src/errors.ts';
 import { Store } from '../src/store.ts';
-import { SCHEMA_VERSION, type TaskContract } from '../src/types.ts';
+import { SCHEMA_VERSION, WRITER_PROTOCOL_GENERATION, type TaskContract } from '../src/types.ts';
 import { implPayload, openTempStore, removeDir, tempDir } from './helpers.ts';
 
 const dirs: string[] = [];
@@ -26,7 +26,7 @@ function sampleTask(overrides: Partial<TaskContract> = {}): TaskContract {
     owner_role: 'OWNER',
     assignee_role: null,
     execution_instance_id: null,
-    writer_generation: 3,
+    writer_generation: WRITER_PROTOCOL_GENERATION,
     source_checkpoint: null,
     repo_root: 'C:\\repo',
     base_commit: 'aaa',
@@ -161,8 +161,8 @@ describe('Store', () => {
     const dispatch = raw.prepare(`SELECT writer_generation FROM dispatch_runs WHERE id = ?`).get(run.id) as { writer_generation: number };
     const event = raw.prepare(`SELECT writer_generation FROM task_events WHERE task_id = ?`).get(task.id) as { writer_generation: number };
     raw.close();
-    expect(dispatch.writer_generation).toBe(9);
-    expect(event.writer_generation).toBe(3);
+    expect(dispatch.writer_generation).toBe(WRITER_PROTOCOL_GENERATION * 3);
+    expect(event.writer_generation).toBe(WRITER_PROTOCOL_GENERATION);
   });
 
   it('rolls back a failed transaction atomically', () => {
@@ -545,7 +545,7 @@ describe('Store', () => {
         ...task,
         status: 'COMPLETED',
         execution_instance_id: 'current-owner',
-        writer_generation: task.writer_generation + 3,
+        writer_generation: task.writer_generation + WRITER_PROTOCOL_GENERATION,
         revision: 2,
       }),
     ).toThrow(/EXECUTION_STATE_INVARIANT_VIOLATION/);
@@ -565,7 +565,7 @@ describe('Store', () => {
       status: 'RUNNING' as const,
       assignee_role: 'JUNIOR' as const,
       execution_instance_id: 'current-owner',
-      writer_generation: ready.writer_generation + 3,
+      writer_generation: ready.writer_generation + WRITER_PROTOCOL_GENERATION,
       revision: 2,
     };
     opened.store.updateTask(running);
@@ -576,7 +576,7 @@ describe('Store', () => {
       ...running,
       status: 'COMPLETED' as const,
       execution_instance_id: null,
-      writer_generation: running.writer_generation + 3,
+      writer_generation: running.writer_generation + WRITER_PROTOCOL_GENERATION,
       result: null,
       revision: 3,
     };
@@ -674,7 +674,7 @@ describe('Store', () => {
       opened.store.updateTask({
         ...task,
         repo_root: 'repo-b',
-        writer_generation: task.writer_generation + 3,
+        writer_generation: task.writer_generation + WRITER_PROTOCOL_GENERATION,
         revision: 2,
       }),
     ).toThrow(/REPOSITORY_BINDING_MISMATCH/);
@@ -700,7 +700,7 @@ describe('Store', () => {
         ...task,
         assignee_role: 'PRINCIPAL',
         base_commit: 'changed',
-        writer_generation: task.writer_generation + 3,
+        writer_generation: task.writer_generation + WRITER_PROTOCOL_GENERATION,
         revision: 3,
       }),
     ).toThrow(/EXECUTION_STATE_INVARIANT_VIOLATION/);

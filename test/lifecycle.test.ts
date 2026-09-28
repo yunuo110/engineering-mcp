@@ -159,6 +159,15 @@ describe('lifecycle', () => {
     expect(blocked.assignee_role).toBe('JUNIOR');
     expect(db.getRunning()).toBeUndefined();
 
+    expectDomain(
+      () => resumeTask(db, cleanGit({ clean: false, porcelain: ' M README.md' }), {
+        task_id: blocked.id,
+        revision: blocked.revision,
+      }),
+      'DIRTY_WORKTREE',
+    );
+    expect(db.getTask(blocked.id)?.status).toBe('BLOCKED');
+
     const resumed = resumeTask(db, cleanGit({ head: 'ccc222' }), {
       task_id: blocked.id,
       revision: blocked.revision,

@@ -1,6 +1,14 @@
 import type { McpServer } from '@modelcontextprotocol/server';
+import {
+  assertC2CControllerMode,
+  assertC2CPrivateClientMode,
+  executeC2CPlan,
+  executeC2CPlanInputSchema,
+  executeC2CPlanOutputSchema,
+} from './c2c/controller.ts';
+import { C2C_PRIVATE_OPERATION } from './c2c/schema.ts';
 import { inspectRepo } from './git.ts';
-import { isDomainError } from './errors.ts';
+import { DomainError, isDomainError } from './errors.ts';
 import {
   cancelTask,
   checkpointTask,
@@ -9,6 +17,7 @@ import {
   closeTask,
   createDiagnosisFromCheckpoint,
   createTask,
+  createTaskOnce,
   getTask,
   inspectClaimableTask,
   listActiveTasks,
@@ -18,7 +27,10 @@ import {
   reportResult,
 } from './lifecycle.ts';
 import { toolsForProcessRole } from './role.ts';
+import { assertWorkPrivateMode, WORK_PRIVATE_TOOLS } from './work/schema.ts';
+import { pendingWorkDecision, resolveWorkDecision } from './work/decision.ts';
 import { delegateTask, waitForDispatch } from './orchestration/dispatcher.ts';
+import { observeExecutionGroup } from './orchestration/execution-group.ts';
 import { listWorkerProfiles, resolveWorkerProfile, type WorkerProfiles } from './worker-profiles.ts';
 import type { Store } from './store.ts';
 import {
@@ -31,10 +43,13 @@ import {
   claimTaskInputSchema,
   closeTaskInputSchema,
   createTaskInputSchema,
+  createTaskOnceInputSchema,
   createDiagnosisFromCheckpointInputSchema,
   delegateTaskInputSchema,
   dispatchToolOutputSchema,
   getTaskInputSchema,
+  getWorkSubmissionInputSchema,
+  resolveWorkDecisionInputSchema,
   inspectClaimableTaskInputSchema,
   listActiveTasksInputSchema,
   listToolOutputSchema,
@@ -46,6 +61,8 @@ import {
   reportResultInputSchema,
   resumeTaskInputSchema,
   taskToolOutputSchema,
+  workSubmissionToolOutputSchema,
+  workDecisionToolOutputSchema,
   transitionTaskToolOutputSchema,
   type GitSnapshot,
   type ProcessRole,
@@ -62,6 +79,12 @@ export type ServerConfig = {
   store: Store;
   executionInstanceId: string;
   workerProfiles: WorkerProfiles;
+  enableC2CController?: boolean;
+  c2cPrivateClient?: boolean;
+  c2cContractVersion?: string;
+  workPrivateClient?: boolean;
+  workContractVersion?: string;
+  developmentIdentityFrame?: () => Buffer | undefined;
 };
 
 function taskText(prefix: string, task: TaskContract): string {
@@ -232,9 +255,138 @@ function fail(error: unknown) {
 }
 
 export function registerRoleTools(server: McpServer, config: ServerConfig): void {
+  assertC2CControllerMode(config.processRole, config.enableC2CController);
+  assertC2CPrivateClientMode(
+    config.processRole,
+    config.enableC2CController,
+    config.c2cPrivateClient,
+    config.c2cContractVersion,
+  );
+  assertWorkPrivateMode(
+    config.processRole,
+    config.workPrivateClient,
+    config.workContractVersion,
+    config.enableC2CController,
+    config.c2cPrivateClient,
+  );
   const allowed = new Set(toolsForProcessRole(config.processRole));
   const actor = processRoleToRole(config.processRole);
-  config.store.bindRepository(config.repoPath);
+  const controllerContext = config.enableC2CController === true ? Object.freeze({
+    processRole: config.processRole,
+    enableC2CController: true,
+    repoPath: inspectRepo(config.repoPath).repoRoot,
+    store: config.store,
+    workerProfiles: config.workerProfiles,
+    developmentIdentityFrame: config.developmentIdentityFrame,
+  }) : undefined;
+  config.store.bindRepository(controllerContext?.repoPath ?? config.repoPath);
+
+  if (controllerContext) {
+    server.registerTool(C2C_PRIVATE_OPERATION, {
+      title: 'Execute an evaluated C2C PLAN',
+      description: 'Explicit OWNER command: evaluate PLAN, accept, create durable dispatch, and request controlled launch. Reuse all identities after response loss. Does not create or resume tasks; launch is not completion.',
+      inputSchema: executeC2CPlanInputSchema,
+      outputSchema: executeC2CPlanOutputSchema,
+    }, (args) => {
+      const result = executeC2CPlan(controllerContext, args);
+      return {
+        ...(result.ok ? {} : { isError: true }),
+        content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+        structuredContent: result,
+      };
+    });
+  }
+
+  if (config.c2cPrivateClient === true) return;
+
+  if (config.workPrivateClient === true) {
+    server.registerTool(
+      WORK_PRIVATE_TOOLS[0],
+      {
+        title: 'Create task once for a Work submission',
+        description: 'Atomically bind one stable submission identity to a READY task.',
+        inputSchema: createTaskOnceInputSchema,
+        outputSchema: transitionTaskToolOutputSchema,
+      },
+      (args) => {
+        try {
+          if (!config.store.getWorkSubmission(args.submission_id)) {
+            resolveWorkerProfile(config.workerProfiles, args.worker_profile_id);
+          }
+          const git = inspectRepo(config.repoPath);
+          const task = createTaskOnce(config.store, git, args.submission_id, args.task, args.worker_profile_id,
+            args.scope_rules);
+          return okTask('Created or recovered', task, latestReceipt(config.store, task));
+        } catch (error) { return fail(error); }
+      },
+    );
+    server.registerTool(
+      WORK_PRIVATE_TOOLS[1],
+      {
+        title: 'Resolve Work submission',
+        description: 'Resolve stable Work submission identity to its authoritative task.',
+        inputSchema: getWorkSubmissionInputSchema,
+        outputSchema: workSubmissionToolOutputSchema,
+      },
+      (args) => {
+        try {
+          const binding = config.store.getWorkSubmission(args.submission_id);
+          if (!binding) return fail(new DomainError('WORK_SUBMISSION_NOT_FOUND', 'Work submission was not found'));
+          const task = getTask(config.store, 'OWNER', binding.task_id);
+          const dispatch = task.status === 'RUNNING' ? config.store.getActiveDispatchForTask(task.id) : undefined;
+          const group = task.status === 'RUNNING' && dispatch
+            ? observeExecutionGroup(config.store.path, config.repoPath, dispatch.id,
+              task.execution_instance_id ?? undefined).state
+            : task.status === 'RUNNING' ? 'UNKNOWN' : undefined;
+          const result = okTask('Found', task);
+          return {
+            ...result,
+            structuredContent: { ...result.structuredContent, worker_profile_id: binding.worker_profile_id,
+              ...(group ? { execution_group_state: group } : {}),
+              ...(binding.scope_rules === undefined ? {} : { scope_rules: binding.scope_rules }),
+              ...(pendingWorkDecision(args.submission_id, task)
+                ? { pending_decision: pendingWorkDecision(args.submission_id, task) } : {}) },
+          };
+        } catch (error) { return fail(error); }
+      },
+    );
+    server.registerTool(
+      WORK_PRIVATE_TOOLS[2],
+      {
+        title: 'Cancel Work task',
+        description: 'Revision-guarded authoritative cancellation of a Work task.',
+        inputSchema: cancelTaskInputSchema,
+        outputSchema: transitionTaskToolOutputSchema,
+      },
+      (args) => {
+        try {
+          const task = cancelTask(config.store, args.task_id, args.revision, args.reason);
+          return okTask('Cancelled', task, latestReceipt(config.store, task));
+        } catch (error) { return fail(error); }
+      },
+    );
+    server.registerTool(
+      WORK_PRIVATE_TOOLS[3],
+      {
+        title: 'Resolve a pending Work decision',
+        description: 'Atomically record an idempotent OWNER response and resume only the matching permission-blocked task.',
+        inputSchema: resolveWorkDecisionInputSchema,
+        outputSchema: workDecisionToolOutputSchema,
+      },
+      (args) => {
+        try {
+          const git = inspectRepo(config.repoPath);
+          const resolved = resolveWorkDecision(config.store, git, args);
+          const result = okTask('Work decision resolved or replayed', resolved.task,
+            latestReceipt(config.store, resolved.task));
+          return { ...result, structuredContent: { ...result.structuredContent,
+            response_replayed: resolved.response_replayed,
+            resolved_revision: resolved.resolved_revision } };
+        } catch (error) { return fail(error); }
+      },
+    );
+    return;
+  }
 
   if (allowed.has('create_task')) {
     server.registerTool(

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { closeSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { parseArgs } from 'node:util';
 import { ledgerPathFor } from './db-path.ts';
 import { inspectRepo } from './git.ts';
 import { resolveRepository } from './repository-resolver.ts';
@@ -17,6 +18,9 @@ import {
   prepareConfigure,
   type ConfigureHost,
 } from './configure.ts';
+import { C2C_PRIVATE_OPERATION, C2C_PRIVATE_TRANSPORT, C2C_PROTOCOL_VERSION } from './c2c/schema.ts';
+import { WORK_PROTOCOL_VERSION } from './work/schema.ts';
+import { traceTestProcess } from './orchestration/v2-process-trace.ts';
 
 const VERSION = '0.1.1';
 const serverEntry = resolveRuntimeEntry(import.meta.url, {
@@ -34,6 +38,8 @@ Usage:
   engineering-mcp setup
   engineering-mcp configure --host codex|grok [--repo <path>] [--config <absolute-path>] [--command <executable>]
   engineering-mcp configure --apply --plan <preview-identity> [matching assertions]
+  engineering-mcp c2c-client --contract-version ${C2C_PROTOCOL_VERSION} --repo <path> [--db <path>] [--worker-profiles <path>]
+  engineering-mcp work-client --contract-version ${WORK_PROTOCOL_VERSION} --repo <path> [--db <path>] [--worker-profiles <path>]
   engineering-mcp doctor
   engineering-mcp profiles
   engineering-mcp adapter validate <manifest>
@@ -44,21 +50,110 @@ Commands:
   configure             Safely preview or explicitly apply a repository-pinned host entry
   doctor                Report local runtime, Git, ledger, and harness availability
   profiles              Print loaded worker profiles without invoking models
+  c2c-client            Start the versioned private ${C2C_PRIVATE_TRANSPORT} compatibility surface (${C2C_PRIVATE_OPERATION} only)
+  work-client           Start the versioned private Work task-binding surface (four tools only)
   adapter validate      Validate a GenericCliAdapter manifest only
   adapter probe         Locate the manifest command without invoking a model
 
 Options:
   --help                Show this help.
+  --enable-c2c-controller  Explicit OWNER-only C2C controller opt-in (never enabled by host configuration).
 `);
 }
 
 function runServer(args: string[]): void {
-  const child = spawn(process.execPath, [serverEntry, ...args], {
-    stdio: 'inherit',
-    shell: false,
-    windowsHide: true,
+  traceTestProcess('cli_wrapper_server_spawn_requested', { server_entry: serverEntry });
+  const hasIdentityChannel = args.includes('--development-identity-fd')
+    || args.some((x) => x.startsWith('--development-identity-fd='));
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(process.execPath, [serverEntry, ...args], {
+      stdio: hasIdentityChannel ? ['inherit', 'inherit', 'inherit', 3] : 'inherit',
+      shell: false,
+      windowsHide: true,
+    });
+  } finally {
+    // The wrapper never reads credentials and must not retain its own copy
+    // of the channel after passing the descriptor to the Core server.
+    if (hasIdentityChannel) closeSync(3);
+  }
+  traceTestProcess('cli_wrapper_server_spawn_returned', { server_pid: child.pid ?? null });
+  child.on('exit', (code, signal) => traceTestProcess('cli_wrapper_server_exit', {
+    server_pid: child.pid ?? null, code, signal }));
+  child.on('close', (code, signal) => {
+    traceTestProcess('cli_wrapper_server_close', { server_pid: child.pid ?? null, code, signal });
+    process.exit(code ?? 1);
   });
-  child.on('close', (code) => process.exit(code ?? 1));
+  process.on('exit', (code) => traceTestProcess('cli_wrapper_exit', { code }));
+}
+
+function runPrivateC2CClient(args: string[]): void {
+  for (const name of ['contract-version', 'repo', 'db', 'worker-profiles', 'development-identity-fd']) {
+    const count = args.filter((arg) => arg === `--${name}` || arg.startsWith(`--${name}=`)).length;
+    if (count > 1) throw new Error(`Duplicate --${name} is not allowed`);
+  }
+  const parsed = parseArgs({
+    args,
+    options: {
+      'contract-version': { type: 'string' },
+      repo: { type: 'string' },
+      db: { type: 'string' },
+      'worker-profiles': { type: 'string' },
+      'development-identity-fd': { type: 'string' },
+    },
+    strict: true,
+    allowPositionals: false,
+  });
+  if (parsed.values['contract-version'] !== C2C_PROTOCOL_VERSION) {
+    throw new Error(`--contract-version must be ${C2C_PROTOCOL_VERSION}`);
+  }
+  if (!parsed.values.repo) {
+    throw new Error('c2c-client requires an explicit --repo');
+  }
+  const serverArgs = [
+    '--role', 'owner',
+    '--repo', parsed.values.repo,
+    '--enable-c2c-controller',
+    '--c2c-private-client',
+    '--c2c-contract-version', C2C_PROTOCOL_VERSION,
+  ];
+  if (parsed.values.db) serverArgs.push('--db', parsed.values.db);
+  if (parsed.values['development-identity-fd']) serverArgs.push('--development-identity-fd', parsed.values['development-identity-fd']);
+  if (parsed.values['worker-profiles']) {
+    serverArgs.push('--worker-profiles', parsed.values['worker-profiles']);
+  }
+  runServer(serverArgs);
+}
+
+function runPrivateWorkClient(args: string[]): void {
+  for (const name of ['contract-version', 'repo', 'db', 'worker-profiles']) {
+    const count = args.filter((arg) => arg === `--${name}` || arg.startsWith(`--${name}=`)).length;
+    if (count > 1) throw new Error(`Duplicate --${name} is not allowed`);
+  }
+  const parsed = parseArgs({
+    args,
+    options: {
+      'contract-version': { type: 'string' },
+      repo: { type: 'string' },
+      db: { type: 'string' },
+      'worker-profiles': { type: 'string' },
+    },
+    strict: true,
+    allowPositionals: false,
+  });
+  if (parsed.values['contract-version'] !== WORK_PROTOCOL_VERSION) {
+    throw new Error(`--contract-version must be ${WORK_PROTOCOL_VERSION}`);
+  }
+  if (!parsed.values.repo) throw new Error('work-client requires an explicit --repo');
+  const serverArgs = [
+    '--role', 'owner',
+    '--repo', parsed.values.repo,
+    '--work-private-client',
+    '--work-contract-version', WORK_PROTOCOL_VERSION,
+  ];
+  if (parsed.values.db) serverArgs.push('--db', parsed.values.db);
+  if (parsed.values['worker-profiles']) serverArgs.push('--worker-profiles', parsed.values['worker-profiles']);
+  runServer(serverArgs);
 }
 
 function optionValue(args: string[], name: string): string | undefined {
@@ -464,9 +559,15 @@ function adapterCommand(args: string[]): void {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
-  if (args.length === 0 || args.includes('--help') || args.includes('-h') || args[0] === 'help') {
-    printHelp();
-    return;
+  if (args.some((arg) => arg === '--enable-c2c-controller' || arg.startsWith('--enable-c2c-controller='))) {
+    // Do not silently ignore opt-in on a utility command or a non-OWNER role.
+    const roles = args.filter((arg) => arg === '--role' || arg.startsWith('--role='));
+    if (args.filter((arg) => arg === '--enable-c2c-controller').length !== 1 ||
+        args.some((arg) => arg.startsWith('--enable-c2c-controller=')) ||
+        roles.length !== 1 || !args.includes('--role') || optionValue(args, '--role') !== 'owner' ||
+        ['setup', 'configure', 'doctor', 'profiles', 'adapter', 'help'].includes(args[0] ?? '')) {
+      throw new Error('--enable-c2c-controller requires an explicit --role owner server launch');
+    }
   }
 
   if (args.length === 0 || args.includes('--help') || args.includes('-h') || args[0] === 'help') {
@@ -493,6 +594,14 @@ async function main(): Promise<void> {
   }
   if (cmd === 'profiles') {
     profilesCommand(rest);
+    return;
+  }
+  if (cmd === 'c2c-client') {
+    runPrivateC2CClient(rest);
+    return;
+  }
+  if (cmd === 'work-client') {
+    runPrivateWorkClient(rest);
     return;
   }
 

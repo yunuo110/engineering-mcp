@@ -128,7 +128,17 @@ function main(): void {
   const delayMs = Number(values.delay ?? 0);
 
   if (values.mode === 'crash-after-claim') {
-    claimTask(store, git, 'JUNIOR', executionInstanceId, values.task, Number(values.revision));
+    const dispatch = store.getDispatchRun(values.dispatch);
+    if (!dispatch || dispatch.task_id !== values.task || dispatch.status !== 'launching') {
+      throw new Error('crash fixture dispatch is not launching for this task');
+    }
+    claimTask(store, git, 'JUNIOR', executionInstanceId, values.task, Number(values.revision), {
+      ...dispatch,
+      status: 'running',
+      runner_instance_id: executionInstanceId,
+      started_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
     // Simulate crash after claim, before report.
     process.exit(9);
   }

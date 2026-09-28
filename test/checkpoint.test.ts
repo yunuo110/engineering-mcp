@@ -1,6 +1,7 @@
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { DomainError } from '../src/errors.ts';
 import {
   checkpointTask,
   claimTask,
@@ -27,6 +28,19 @@ import {
 
 const dirs: string[] = [];
 const stores: Store[] = [];
+
+function expectAuthoritySubmoduleRefusal(action: () => unknown): void {
+  try {
+    action();
+    expect.fail('authority Git must refuse a repository with an unsupported submodule');
+  } catch (error) {
+    expect(error).toBeInstanceOf(DomainError);
+    expect((error as DomainError).code).toBe('GIT_COMMAND_FAILED');
+    expect((error as Error).message).toMatch(
+      /submodule authority configuration unsupported|repository configuration is outside authority schema: submodule\.[^.]+\.url/,
+    );
+  }
+}
 
 afterEach(() => {
   for (const store of stores.splice(0)) store.close();
@@ -337,31 +351,21 @@ describe('immutable lifecycle checkpoints', () => {
     expect(git(repo, ['rev-parse', 'HEAD'])).toBe(completed.base_commit);
   });
 
-  it('fails before mutation when Git cannot capture nested repository dirt', () => {
+  it('refuses nested repository dirt before any checkpoint side effect', () => {
     const child = initGitRepo();
     const repo = initGitRepo();
     dirs.push(repo, child);
     writeFileSync(join(child, 'child.txt'), 'base\n');
     git(child, ['add', 'child.txt']);
     git(child, ['commit', '-m', 'child base']);
-    git(repo, ['-c', 'protocol.file.allow=always', 'submodule', 'add', child, 'vendor']);
-    git(repo, ['commit', '-am', 'add child']);
     const opened = openTempStore(repo);
     stores.push(opened.store);
     dirs.push(opened.dir);
     const payload = { ...implPayload, allowed_scope: ['vendor'], forbidden_scope: [] };
-    const created = createTask(opened.store, snapshot(repo), {
-      type: 'IMPLEMENTATION',
-      payload,
-    });
-    const running = claimTask(
-      opened.store,
-      snapshot(repo),
-      'JUNIOR',
-      'nested-writer',
-      created.id,
-      created.revision,
-    );
+    const created = createTask(opened.store, snapshot(repo), { type: 'IMPLEMENTATION', payload });
+    const running = claimTask(opened.store, snapshot(repo), 'JUNIOR', 'nested-writer', created.id, created.revision);
+    git(repo, ['-c', 'protocol.file.allow=always', 'submodule', 'add', child, 'vendor']);
+    git(repo, ['commit', '-am', 'add child']);
     writeFileSync(join(repo, 'vendor', 'child.txt'), 'dirty nested content\n');
     const blocked = reportBlocked(opened.store, 'JUNIOR', 'nested-writer', {
       task_id: running.id,
@@ -374,14 +378,13 @@ describe('immutable lifecycle checkpoints', () => {
       },
     });
     const head = git(repo, ['rev-parse', 'HEAD']);
-    expectDomain(
+    expectAuthoritySubmoduleRefusal(
       () =>
         checkpointTask(opened.store, snapshot(repo), {
           task_id: blocked.id,
           revision: blocked.revision,
           purpose: 'RESUME',
         }),
-      'CHECKPOINT_UNCAPTURED_CHANGES',
     );
     expect(git(repo, ['rev-parse', 'HEAD'])).toBe(head);
     expect(readFileSync(join(repo, 'vendor', 'child.txt'), 'utf8')).toBe('dirty nested content\n');
@@ -400,28 +403,28 @@ describe('immutable lifecycle checkpoints', () => {
     const blocked = block(fixture.store, fixture.running);
     const head = git(fixture.repo, ['rev-parse', 'HEAD']);
 
-    expectDomain(() => checkpointTask(fixture.store, snapshot(fixture.repo), {
+    expectAuthoritySubmoduleRefusal(() => checkpointTask(fixture.store, snapshot(fixture.repo), {
       task_id: blocked.id, revision: blocked.revision, purpose: 'RESUME',
-    }), 'CHECKPOINT_UNSAFE_GITLINK');
+    }));
     expect(git(fixture.repo, ['rev-parse', 'HEAD'])).toBe(head);
     expect(() => git(fixture.repo, ['show-ref', '--verify', `refs/engineering-mcp/checkpoints/${blocked.id}/${blocked.revision}`])).toThrow();
     expect(fixture.store.getCheckpointForRevision(blocked.id, blocked.revision)).toBeUndefined();
     expect(readFileSync(join(nested, 'nested.txt'), 'utf8')).toBe('nested value\n');
   });
 
-  it('rejects a clean submodule HEAD advance and a removed gitlink', () => {
+  it('rejects submodule HEAD advance and removed gitlink before checkpoint side effects', () => {
     for (const mutation of ['advance', 'remove'] as const) {
       const child = initGitRepo();
       const repo = initGitRepo();
       dirs.push(child, repo);
-      git(repo, ['-c', 'protocol.file.allow=always', 'submodule', 'add', child, 'vendor']);
-      git(repo, ['commit', '-am', 'add submodule']);
       const opened = openTempStore(repo);
       stores.push(opened.store);
       dirs.push(opened.dir);
       const payload = { ...implPayload, allowed_scope: ['vendor'], forbidden_scope: [], context_files: [] };
       const created = createTask(opened.store, snapshot(repo), { type: 'IMPLEMENTATION', payload });
       const running = claimTask(opened.store, snapshot(repo), 'JUNIOR', `gitlink-${mutation}`, created.id, created.revision);
+      git(repo, ['-c', 'protocol.file.allow=always', 'submodule', 'add', child, 'vendor']);
+      git(repo, ['commit', '-am', 'add submodule']);
       if (mutation === 'advance') {
         writeFileSync(join(repo, 'vendor', 'next.txt'), 'next\n');
         git(join(repo, 'vendor'), ['add', 'next.txt']);
@@ -435,9 +438,9 @@ describe('immutable lifecycle checkpoints', () => {
         blocker: { reason: 'OTHER', summary: 'gitlink changed', need_from_owner: 'checkpoint', evidence_refs: [] },
       });
       const head = git(repo, ['rev-parse', 'HEAD']);
-      expectDomain(() => checkpointTask(opened.store, snapshot(repo), {
+      expectAuthoritySubmoduleRefusal(() => checkpointTask(opened.store, snapshot(repo), {
         task_id: blocked.id, revision: blocked.revision, purpose: 'RESUME',
-      }), 'CHECKPOINT_UNSAFE_GITLINK');
+      }));
       expect(git(repo, ['rev-parse', 'HEAD'])).toBe(head);
       expect(() => git(repo, ['show-ref', '--verify', `refs/engineering-mcp/checkpoints/${blocked.id}/${blocked.revision}`])).toThrow();
       expect(opened.store.getCheckpointForRevision(blocked.id, blocked.revision)).toBeUndefined();
@@ -447,28 +450,16 @@ describe('immutable lifecycle checkpoints', () => {
     }
   });
 
-  it('preserves an unchanged existing gitlink while checkpointing an unrelated parent file', () => {
+  it('refuses even an unchanged existing gitlink at repository admission', () => {
     const child = initGitRepo();
     const repo = initGitRepo();
     dirs.push(child, repo);
     git(repo, ['-c', 'protocol.file.allow=always', 'submodule', 'add', child, 'vendor']);
     git(repo, ['commit', '-am', 'add submodule']);
     const gitlink = git(repo, ['rev-parse', 'HEAD:vendor']);
-    const opened = openTempStore(repo);
-    stores.push(opened.store);
-    dirs.push(opened.dir);
-    const payload = { ...implPayload, allowed_scope: ['output.txt'], forbidden_scope: [], context_files: [] };
-    const created = createTask(opened.store, snapshot(repo), { type: 'IMPLEMENTATION', payload });
-    const running = claimTask(opened.store, snapshot(repo), 'JUNIOR', 'parent-writer', created.id, created.revision);
-    writeFileSync(join(repo, 'output.txt'), 'parent output\n');
-    const blocked = reportBlocked(opened.store, 'JUNIOR', 'parent-writer', {
-      task_id: running.id,
-      revision: running.revision,
-      blocker: { reason: 'OTHER', summary: 'done', need_from_owner: 'checkpoint', evidence_refs: [], changed_files: ['output.txt'] },
-    });
-    const saved = checkpointTask(opened.store, snapshot(repo), {
-      task_id: blocked.id, revision: blocked.revision, purpose: 'RESUME',
-    });
-    expect(git(repo, ['rev-parse', `${saved.checkpoint.checkpoint_commit}:vendor`])).toBe(gitlink);
+    const head = git(repo, ['rev-parse', 'HEAD']);
+    expectAuthoritySubmoduleRefusal(() => snapshot(repo));
+    expect(git(repo, ['rev-parse', 'HEAD:vendor'])).toBe(gitlink);
+    expect(git(repo, ['rev-parse', 'HEAD'])).toBe(head);
   });
 });

@@ -3,16 +3,20 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  test:
-    name: Test (${{ matrix.os }} / Node ${{ matrix.node }})
+  fast:
+    name: Core Fast CI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        node: [24]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,7 +24,54 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: git diff --check
+      # The shared Vitest setup resolves Git through Windows where.exe.
+      - name: Windows contract tests
+        if: runner.os == 'Windows'
+        run: >-
+          npm exec -- vitest run
+          test/native-build-attestation.test.ts
+          test/trusted-runtime-closure.test.ts
+          test/authority-git.test.ts
+          test/execution-evidence.test.ts
+          test/execution-security-native.test.ts
+          test/execution-keeper.test.ts
+          test/c2c-launch-spec.test.ts
+          test/c2c-controller.test.ts
+          test/c2c-controlled-launch.test.ts
+          test/restricted-worker-launch.test.ts
+          test/repository-occupancy.test.ts
+          test/witness-security-source.test.ts
+          test/generic-cli-adapter.test.ts
+
+  windows-full-regression:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    name: Core Windows Full Regression
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # mixed-version tests load real legacy source by historical commit.
+          fetch-depth: 0
+          # PR defaults to a synthetic merge commit; final evidence binds to the branch HEAD.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Record and verify tested commit
+        shell: pwsh
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          Write-Output "TESTED_COMMIT_SHA=$actual"
+          if ($actual -cne $env:EXPECTED_HEAD_SHA) { throw 'Tested commit differs from event head' }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run typecheck

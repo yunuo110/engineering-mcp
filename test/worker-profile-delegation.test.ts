@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -12,6 +12,7 @@ import {
   type Connected,
 } from './helpers.ts';
 import { loadWorkerProfiles, type WorkerProfiles } from '../src/worker-profiles.ts';
+import { dispatchRunDir } from '../src/dispatch-run-dir.ts';
 import type { Store } from '../src/store.ts';
 
 const dirs: string[] = [];
@@ -210,7 +211,7 @@ describe('OWNER worker profile delegation', () => {
     expect(profiles.find((p) => p.id === 'generic-test')?.adapter).toBe('generic-cli');
   });
 
-  it('delegates through an explicit generic worker profile to COMPLETED', async () => {
+  it('selects an explicit generic worker profile but refuses unprovisioned Worker execution', async () => {
     const { owner } = await ownerSession(writeProfilesAndManifest().profiles);
     const created = await owner.client.callTool({
       name: 'create_task',
@@ -239,16 +240,20 @@ describe('OWNER worker profile delegation', () => {
     expect(delegated.isError).toBeFalsy();
     const body = structured(delegated);
     expect(body.ok).toBe(true);
-    const run = body.dispatch_run as { status: string; adapter_id: string; worker_profile_id: string };
-    expect(run.status).toBe('completed');
+    const run = body.dispatch_run as { status: string; adapter_id: string; worker_profile_id: string; error_code: string; error_detail: string };
+    expect(run.status).toBe('blocked');
     expect(run.adapter_id).toBe('generic-cli');
     expect(run.worker_profile_id).toBe('generic-test');
-    expect((body.task as { status: string }).status).toBe('COMPLETED');
+    expect(run.error_code).toBe('WORKER_PROCESS_FAILED');
+    expect(run.error_detail).toBe('WORKER_PROCESS_FAILED');
+    expect((body.task as { status: string; blocker: { summary: string } }).status).toBe('BLOCKED');
+    expect((body.task as { blocker: { summary: string } }).blocker.summary).toContain('WORKER_IDENTITY_REFUSED:not provisioned');
   });
 
-  it('executes startup-captured manifest snapshot and ignores later manifest/profile mutation', async () => {
+  it('dispatches the startup-captured manifest snapshot and refuses execution without Worker identity', async () => {
     const fixture = writeMutationFixture();
     const { owner, repo } = await ownerSession(fixture.profiles);
+    const originalManifest = readFileSync(fixture.manifest, 'utf8');
 
     // Mutate the original manifest to B and the profile YAML to a different
     // registry. Neither may affect the already-loaded immutable profile.
@@ -319,11 +324,14 @@ profiles:
     expect(delegated.isError).toBeFalsy();
     const body = structured(delegated);
     expect(body.ok).toBe(true);
-    expect((body.task as { status: string }).status).toBe('COMPLETED');
-
-    const { existsSync, readFileSync } = await import('node:fs');
-    expect(existsSync(join(repo, 'a.txt'))).toBe(true);
-    expect(readFileSync(join(repo, 'a.txt'), 'utf8')).toContain('A');
+    const run = body.dispatch_run as { id: string; status: string; error_code: string; error_detail: string };
+    expect(run.status).toBe('blocked');
+    expect(run.error_code).toBe('WORKER_PROCESS_FAILED');
+    expect(run.error_detail).toBe('WORKER_PROCESS_FAILED');
+    expect((body.task as { status: string; blocker: { summary: string } }).status).toBe('BLOCKED');
+    expect((body.task as { blocker: { summary: string } }).blocker.summary).toContain('WORKER_IDENTITY_REFUSED:not provisioned');
+    expect(readFileSync(join(dispatchRunDir(run.id), 'manifest.yaml'), 'utf8')).toBe(originalManifest);
+    expect(existsSync(join(repo, 'a.txt'))).toBe(false);
     expect(existsSync(join(repo, 'b.txt'))).toBe(false);
   });
 

@@ -1,9 +1,13 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import './fixtures/worker-process-unit-seam.ts';
 import { createTask } from '../src/lifecycle.ts';
+import { GenericCliAdapter } from '../src/adapters/generic-cli-adapter.ts';
+import { loadManifest } from '../src/adapters/manifest.ts';
 import { delegateTask } from '../src/orchestration/dispatcher.ts';
 import type { Store } from '../src/store.ts';
+import type { GitSnapshot, TaskContract } from '../src/types.ts';
 import { initGitRepo, openTempStore, removeDir, snapshot, tempDir } from './helpers.ts';
 
 const dirs: string[] = [];
@@ -56,8 +60,20 @@ process:
   return path;
 }
 
-describe('Generic CLI Harness real orchestration integration', () => {
-  it('runs a real Worker Runner to a generic fake harness and completes', async () => {
+function delegateGenericFixture(db: Store, git: GitSnapshot, task: TaskContract,
+  mode: string, protocolMode = 'native') {
+  const manifest = loadManifest(manifestPath(mode, protocolMode));
+  return delegateTask(db, git, task.id, task.revision, {
+    adapterId: 'generic-cli', inProcess: true,
+    executionInstanceId: 'generic-fixture-runner',
+    adapter: new GenericCliAdapter(manifest), timeoutMs: 30_000,
+  });
+}
+
+// Runner/lifecycle and fake Harness process are real; the restricted-token
+// transition is a unit seam and does not establish a Worker SID.
+describe('Generic CLI Harness Runner-logic integration', () => {
+  it('runs Runner logic to a generic fake harness and completes', async () => {
     const repo = initGitRepo();
     dirs.push(repo);
     const db = testStore(repo);
@@ -77,11 +93,7 @@ describe('Generic CLI Harness real orchestration integration', () => {
       },
     });
 
-    const run = await delegateTask(db, git, task.id, task.revision, {
-      adapterId: 'generic-cli',
-      manifestPath: manifestPath('completed'),
-      timeoutMs: 30_000,
-    });
+    const run = await delegateGenericFixture(db, git, task, 'completed');
     expect(run.status).toBe('completed');
     expect(db.getTask(task.id)?.status).toBe('COMPLETED');
     // eslint-disable-next-line no-undef
@@ -110,11 +122,7 @@ describe('Generic CLI Harness real orchestration integration', () => {
         parent_risk: 'L1',
       },
     });
-    const run = await delegateTask(db, git, task.id, task.revision, {
-      adapterId: 'generic-cli',
-      manifestPath: manifestPath('lie'),
-      timeoutMs: 30_000,
-    });
+    const run = await delegateGenericFixture(db, git, task, 'lie');
     expect(run.status).toBe('blocked');
     expect(run.error_code).toBe('SCOPE_VIOLATION');
     expect(db.getTask(task.id)?.status).toBe('BLOCKED');
@@ -139,11 +147,7 @@ describe('Generic CLI Harness real orchestration integration', () => {
         parent_risk: 'L1',
       },
     });
-    const run = await delegateTask(db, git, task.id, task.revision, {
-      adapterId: 'generic-cli',
-      manifestPath: manifestPath('forbidden'),
-      timeoutMs: 30_000,
-    });
+    const run = await delegateGenericFixture(db, git, task, 'forbidden');
     expect(run.status).toBe('blocked');
     expect(run.error_code).toBe('SCOPE_VIOLATION');
   });
@@ -167,11 +171,7 @@ describe('Generic CLI Harness real orchestration integration', () => {
         parent_risk: 'L1',
       },
     });
-    const run = await delegateTask(db, git, task.id, task.revision, {
-      adapterId: 'generic-cli',
-      manifestPath: manifestPath('head-change'),
-      timeoutMs: 30_000,
-    });
+    const run = await delegateGenericFixture(db, git, task, 'head-change');
     expect(run.status).toBe('blocked');
     expect(run.error_code).toBe('UNEXPECTED_HEAD_CHANGE');
     expect(snapshot(repo).head).not.toBe(git.head);
@@ -196,11 +196,7 @@ describe('Generic CLI Harness real orchestration integration', () => {
         parent_risk: 'L1',
       },
     });
-    const run = await delegateTask(db, git, task.id, task.revision, {
-      adapterId: 'generic-cli',
-      manifestPath: manifestPath('malformed'),
-      timeoutMs: 30_000,
-    });
+    const run = await delegateGenericFixture(db, git, task, 'malformed');
     expect(run.status).toBe('blocked');
     expect(run.error_code).toBe('WORKER_PROTOCOL_FAILURE');
   });
@@ -224,11 +220,7 @@ describe('Generic CLI Harness real orchestration integration', () => {
         parent_risk: 'L1',
       },
     });
-    const run = await delegateTask(db, git, task.id, task.revision, {
-      adapterId: 'generic-cli',
-      manifestPath: manifestPath('completed', 'prompt-wrapper'),
-      timeoutMs: 30_000,
-    });
+    const run = await delegateGenericFixture(db, git, task, 'completed', 'prompt-wrapper');
     expect(run.status).toBe('completed');
     expect(db.getTask(task.id)?.status).toBe('COMPLETED');
   });
@@ -252,11 +244,7 @@ describe('Generic CLI Harness real orchestration integration', () => {
         parent_risk: 'L1',
       },
     });
-    const run = await delegateTask(db, git, task.id, task.revision, {
-      adapterId: 'generic-cli',
-      manifestPath: manifestPath('dsh-request-echo', 'prompt-wrapper'),
-      timeoutMs: 30_000,
-    });
+    const run = await delegateGenericFixture(db, git, task, 'dsh-request-echo', 'prompt-wrapper');
     expect(run.status).toBe('blocked');
     expect(run.error_code).toBe('WORKER_PROTOCOL_FAILURE');
     expect(db.getTask(task.id)?.status).toBe('BLOCKED');

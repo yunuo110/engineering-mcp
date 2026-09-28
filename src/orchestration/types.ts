@@ -1,4 +1,5 @@
 import { z } from 'zod/v4';
+import { completionContradiction } from '../result-consistency.ts';
 import {
   blockerReasonSchema,
   environmentEvidenceSchema,
@@ -25,7 +26,11 @@ export type WorkerResult = {
   environment?: z.infer<typeof environmentEvidenceSchema>;
   exit_code: number;
   /** Trusted adapter observation. This field is not part of EWP and is never parsed from worker output. */
-  runner_error_code?: 'WORKER_PROCESS_FAILED' | 'WORKER_PROTOCOL_FAILURE';
+  runner_error_code?:
+    | 'WORKER_PROCESS_FAILED'
+    | 'WORKER_PROTOCOL_FAILURE'
+    | 'CODEX_ARTIFACT_MISMATCH'
+    | 'CODEX_PROCESS_FAILED';
 };
 
 export const workerResultSchema = z.object({
@@ -40,6 +45,9 @@ export const workerResultSchema = z.object({
   git: gitEvidenceSchema.optional(),
   environment: environmentEvidenceSchema.optional(),
   exit_code: z.number().int().nonnegative(),
+}).superRefine((value, context) => {
+  const message = completionContradiction(value);
+  if (message) context.addIssue({ code: 'custom', message });
 });
 export type ValidatedWorkerResult = z.infer<typeof workerResultSchema>;
 

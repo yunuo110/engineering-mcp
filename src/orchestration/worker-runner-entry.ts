@@ -4,6 +4,7 @@ import { createAdapter } from '../adapters/registry.ts';
 import { inspectRepo } from '../git.ts';
 import { Store } from '../store.ts';
 import { runWorkerRunner } from './worker-runner.ts';
+import { initializeRestrictedWorkerIdentityFromStdin, disposeRestrictedWorkerIdentity } from './restricted-worker-launch.ts';
 
 function main(): void {
   const parsed = parseArgs({
@@ -17,10 +18,13 @@ function main(): void {
       manifest: { type: 'string' },
       profile: { type: 'string' },
       model: { type: 'string' },
+      'worker-secret-stdin': { type: 'boolean' },
     },
     strict: true,
   });
   const values = parsed.values;
+  if (values['worker-secret-stdin']) initializeRestrictedWorkerIdentityFromStdin();
+  process.once('exit', disposeRestrictedWorkerIdentity);
   if (!values.store || !values.repo || !values.task || !values.revision || !values.dispatch || !values.adapter) {
     throw new Error('missing worker runner arguments');
   }
@@ -60,9 +64,11 @@ function main(): void {
         process.exitCode = 1;
       })
       .finally(() => {
+        disposeRestrictedWorkerIdentity();
         store.close();
       });
   } catch (error) {
+    disposeRestrictedWorkerIdentity();
     const dispatch = store.getDispatchRun(values.dispatch);
     if (dispatch && (dispatch.status === 'launching' || dispatch.status === 'running')) {
       store.updateDispatchRun({

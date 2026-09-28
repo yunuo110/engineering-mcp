@@ -100,4 +100,47 @@ describe('late spawn errors respect durable dispatch authority', () => {
     children[0]!.emit('error', new Error('error after old connection closed'));
     expect(restartedOwner.getDispatchRun(run.id)).toEqual(old);
   });
+
+  it('PID observation cannot rewrite a cancellation committed by another connection during spawn', async () => {
+    const { store, git, task } = setup();
+    const other = Store.open(store.path, { repoRoot: git.repoRoot }); stores.push(other);
+    let cancelled: ReturnType<Store['getDispatchRun']>;
+    vi.mocked(childProcess.spawn).mockImplementationOnce(() => {
+      const dispatch = other.getActiveDispatchForTask(task.id)!;
+      cancelTask(other, task.id, task.revision);
+      cancelled = other.getDispatchRun(dispatch.id);
+      return Object.assign(new EventEmitter(), { pid: 54321 }) as childProcess.ChildProcess;
+    });
+    const run = await delegateTask(store, git, task.id, task.revision, { adapterId: 'fixture', wait: false });
+    expect(run).toEqual(cancelled!);
+    expect(store.getDispatchRun(run.id)).toEqual(cancelled!);
+  });
+
+  it.each(['completed', 'blocked', 'failed'] as const)('late PID/error/close observations preserve %s dispatch bytes', async (status) => {
+    const { store, git, task } = setup();
+    const children = controlledSpawn();
+    const run = await delegateTask(store, git, task.id, task.revision, { adapterId: 'fixture', wait: false });
+    const other = Store.open(store.path, { repoRoot: git.repoRoot }); stores.push(other);
+    other.transact(() => other.updateDispatchRun({ ...other.getDispatchRun(run.id)!, status,
+      finished_at: '2026-01-01T00:00:00.000Z', error_code: 'AUTHORITATIVE_SENTINEL' }));
+    const terminal = other.getDispatchRun(run.id);
+    expect(store.recordDispatchProcessObservation(run.id, { kind: 'pid', pid: 67890 })).toBe(false);
+    children[0]!.emit('close', 0);
+    children[0]!.emit('error', new Error('late failure'));
+    expect(store.getDispatchRun(run.id)).toEqual(terminal);
+  });
+
+  it('PID-only observation preserves the Runner claim committed during spawn', async () => {
+    const { store, git, task } = setup();
+    const other = Store.open(store.path, { repoRoot: git.repoRoot }); stores.push(other);
+    vi.mocked(childProcess.spawn).mockImplementationOnce(() => {
+      const dispatch = other.getActiveDispatchForTask(task.id)!;
+      claimTask(other, git, 'JUNIOR', 'concurrent-runner', task.id, task.revision,
+        { ...dispatch, status: 'running', runner_instance_id: 'concurrent-runner', started_at: '2026-01-01T00:00:00.000Z' });
+      return Object.assign(new EventEmitter(), { pid: 67890 }) as childProcess.ChildProcess;
+    });
+    const run = await delegateTask(store, git, task.id, task.revision, { adapterId: 'fixture', wait: false });
+    expect(run).toMatchObject({ status: 'running', runner_instance_id: 'concurrent-runner', pid: 67890,
+      started_at: '2026-01-01T00:00:00.000Z' });
+  });
 });

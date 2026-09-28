@@ -12,6 +12,9 @@ import { runWorkerRunner } from './worker-runner.ts';
 import { resolveRuntimeEntry } from '../runtime-resolver.ts';
 import { dispatchRunDir } from '../dispatch-run-dir.ts';
 import { requireNoRepositoryCheckpoint } from '../lifecycle.ts';
+import { DomainError } from '../errors.ts';
+import { isProtectedExecutionMode } from './trusted-runtime.ts';
+import { assertRepositoryWriterAdmission } from './repository-occupancy.ts';
 
 const WORKER_RUNNER_ENTRY = resolveRuntimeEntry(import.meta.url, {
   source: './worker-runner-entry.ts',
@@ -41,6 +44,9 @@ export async function delegateTask(
   expectedRevision: number,
   options: DelegateOptions,
 ): Promise<DispatchRun> {
+  if (isProtectedExecutionMode()) {
+    throw new DomainError('ROLE_FORBIDDEN', 'Ordinary delegate_task is unavailable in protected execution mode');
+  }
   requireNoRepositoryCheckpoint(store);
   const task = store.getTask(taskId);
   if (!task) throw new Error('task not found');
@@ -81,6 +87,7 @@ export async function delegateTask(
 
   store.transact(() => {
     requireNoRepositoryCheckpoint(store);
+    assertRepositoryWriterAdmission(store, git.repoRoot);
     store.insertDispatchRun(run);
   });
 
@@ -96,17 +103,8 @@ export async function delegateTask(
         adapter: options.adapter,
       });
     } catch (error) {
-      const current = store.getDispatchRun(run.id);
-      if (current && (current.status === 'launching' || current.status === 'running')) {
-        store.updateDispatchRun({
-          ...current,
-          status: 'failed',
-          finished_at: new Date().toISOString(),
-          error_code: 'CLAIM_FAILED',
-          error_detail: error instanceof Error ? error.message : String(error),
-          updated_at: new Date().toISOString(),
-        });
-      }
+      store.recordDispatchProcessObservation(run.id, { kind: 'failure', errorCode: 'CLAIM_FAILED',
+        errorDetail: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   } else {
@@ -142,42 +140,19 @@ export async function delegateTask(
         windowsHide: true,
       },
     );
-    const current = store.getDispatchRun(run.id);
-    if (current) {
-      store.updateDispatchRun({ ...current, pid: child.pid ?? null, updated_at: new Date().toISOString() });
-    }
+    store.recordDispatchProcessObservation(run.id, { kind: 'pid', pid: child.pid ?? null });
     child.on('error', (error) => {
       try {
-        store.transact(() => {
-          const latest = store.getDispatchRun(run.id);
-          if (latest && (latest.status === 'launching' || latest.status === 'running')) {
-            store.updateDispatchRun({
-              ...latest,
-              status: 'failed',
-              finished_at: new Date().toISOString(),
-              error_code: 'WORKER_PROCESS_FAILED',
-              error_detail: `Failed to spawn worker runner: ${error.message}`,
-              updated_at: new Date().toISOString(),
-            });
-          }
-        });
+        store.recordDispatchProcessObservation(run.id, { kind: 'failure', errorCode: 'WORKER_PROCESS_FAILED',
+          errorDetail: `Failed to spawn worker runner: ${error.message}` });
       } catch {
         // Store may already be closed; dispatch cleanup is best-effort.
       }
     });
     child.on('close', () => {
       try {
-        const latest = store.getDispatchRun(run.id);
-        if (latest && (latest.status === 'launching' || latest.status === 'running')) {
-          store.updateDispatchRun({
-            ...latest,
-            status: 'failed',
-            finished_at: new Date().toISOString(),
-            error_code: 'WORKER_PROCESS_FAILED',
-            error_detail: 'Worker Runner exited before terminal dispatch update',
-            updated_at: new Date().toISOString(),
-          });
-        }
+        store.recordDispatchProcessObservation(run.id, { kind: 'failure', errorCode: 'WORKER_PROCESS_FAILED',
+          errorDetail: 'Worker Runner exited before terminal dispatch update' });
       } catch {
         // Store may already be closed; dispatch cleanup is best-effort.
       }

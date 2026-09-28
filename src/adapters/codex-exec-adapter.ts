@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawnRestrictedWorker } from '../orchestration/restricted-worker-launch.ts';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { workerResultSchema } from '../orchestration/types.ts';
@@ -133,8 +133,8 @@ export class CodexExecAdapter implements WorkerAdapter {
     ];
     const child =
       launch.kind === 'cmd'
-        ? spawn(
-            process.env.ComSpec ?? 'cmd.exe',
+        ? spawnRestrictedWorker(
+            'C:\\Windows\\System32\\cmd.exe',
             [
               '/d',
               '/s',
@@ -149,7 +149,7 @@ export class CodexExecAdapter implements WorkerAdapter {
               windowsVerbatimArguments: true,
             },
           )
-        : spawn(launch.executable, codexArgs, {
+        : spawnRestrictedWorker(launch.executable, codexArgs, {
             cwd: context.repositoryRoot,
             shell: false,
             windowsHide: true,

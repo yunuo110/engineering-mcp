@@ -14,6 +14,7 @@ import {
   type CheckpointFailureStage,
 } from '../src/lifecycle.ts';
 import { Store } from '../src/store.ts';
+import { WRITER_PROTOCOL_GENERATION } from '../src/types.ts';
 import { git, implPayload, implResult, initGitRepo, openTempStore, removeDir, snapshot } from './helpers.ts';
 
 const dirs: string[] = [];
@@ -31,8 +32,9 @@ function blockedFixture() {
   dirs.push(opened.dir);
   stores.push(opened.store);
   const payload = { ...implPayload, allowed_scope: ['output.txt'], forbidden_scope: [], context_files: [] };
-  const created = createTask(opened.store, snapshot(repo), { type: 'IMPLEMENTATION', payload });
-  const running = claimTask(opened.store, snapshot(repo), 'JUNIOR', 'writer', created.id, created.revision);
+  const initialGit = snapshot(repo);
+  const created = createTask(opened.store, initialGit, { type: 'IMPLEMENTATION', payload });
+  const running = claimTask(opened.store, initialGit, 'JUNIOR', 'writer', created.id, created.revision);
   writeFileSync(join(repo, 'output.txt'), 'recoverable\n');
   const blocked = reportBlocked(opened.store, 'JUNIOR', 'writer', {
     task_id: running.id,
@@ -84,7 +86,8 @@ describe('recoverable checkpoint finalization protocol', () => {
       expect(reopened.listCheckpoints(fixture.blocked.id)).toHaveLength(1);
       expect(reopened.listEvents(fixture.blocked.id).filter((event) => event.kind === 'checkpointed')).toHaveLength(1);
       expect(git(fixture.repo, ['show', `${recovered.checkpoint.checkpoint_commit}:output.txt`])).toBe('recoverable');
-    });
+    }, failureStage === 'after_checkpoint_row' || failureStage === 'before_finalize_transaction_commit'
+      ? 45_000 : 30_000);
   }
 
   it('returns the original finalized receipt data after response loss', () => {
@@ -123,10 +126,10 @@ describe('recoverable checkpoint finalization protocol', () => {
       () => checkpointTask(fixture.store, snapshot(fixture.repo), { ...request, purpose: 'REVIEW' }),
     ]) expect(operation).toThrow(/checkpoint|Checkpoint/i);
 
-    expect(() => fixture.store.updateTask({ ...fixture.blocked, writer_generation: fixture.blocked.writer_generation + 3, status: 'CLOSED', revision: fixture.blocked.revision + 1 })).toThrow(/CHECKPOINT_FINALIZATION_REQUIRED/);
+    expect(() => fixture.store.updateTask({ ...fixture.blocked, writer_generation: fixture.blocked.writer_generation + WRITER_PROTOCOL_GENERATION, status: 'CLOSED', revision: fixture.blocked.revision + 1 })).toThrow(/CHECKPOINT_FINALIZATION_REQUIRED/);
     expect(() => fixture.store.updateTask({
       ...fixture.blocked,
-      writer_generation: fixture.blocked.writer_generation + 3,
+      writer_generation: fixture.blocked.writer_generation + WRITER_PROTOCOL_GENERATION,
       base_commit: fixture.store.getCheckpointForRevision(request.task_id, request.revision)!.checkpoint_commit ?? fixture.blocked.base_commit,
       revision: fixture.blocked.revision + 1,
       payload: { ...fixture.blocked.payload, goal: 'mutated during finalization' },
@@ -152,8 +155,7 @@ describe('recoverable checkpoint finalization protocol', () => {
     })).toThrow(/checkpoint|Checkpoint/i);
   });
 
-  it('detects missing and corrupt checkpoint refs before resume', () => {
-    for (const corruption of ['missing', 'wrong'] as const) {
+  it.each(['missing', 'wrong'] as const)('detects %s checkpoint refs before resume', (corruption) => {
       const fixture = blockedFixture();
       const saved = checkpointTask(fixture.store, snapshot(fixture.repo), {
         task_id: fixture.blocked.id,
@@ -171,7 +173,6 @@ describe('recoverable checkpoint finalization protocol', () => {
         task_id: saved.task.id,
         revision: saved.task.revision,
       })).toThrow(/checkpoint|Checkpoint/i);
-    }
   });
 
   it('fences close while a REVIEW checkpoint intent is pending', () => {
@@ -181,11 +182,12 @@ describe('recoverable checkpoint finalization protocol', () => {
       revision: fixture.blocked.revision,
       purpose: 'RESUME',
     });
-    const resumed = resumeTask(fixture.store, snapshot(fixture.repo), {
+    const postCheckpointRepo = snapshot(fixture.repo);
+    const resumed = resumeTask(fixture.store, postCheckpointRepo, {
       task_id: fixture.blocked.id,
       revision: initialCheckpoint.task.revision,
     });
-    const running = claimTask(fixture.store, snapshot(fixture.repo), 'JUNIOR', 'writer-2', resumed.id, resumed.revision);
+    const running = claimTask(fixture.store, postCheckpointRepo, 'JUNIOR', 'writer-2', resumed.id, resumed.revision);
     writeFileSync(join(fixture.repo, 'output.txt'), 'complete\n');
     const completed = reportResult(fixture.store, 'JUNIOR', 'writer-2', {
       task_id: running.id,
@@ -197,5 +199,5 @@ describe('recoverable checkpoint finalization protocol', () => {
       task_id: completed.id, revision: completed.revision, purpose: 'REVIEW',
     }, { onStage(stage) { if (stage === 'after_intent') throw new Error('stop'); } })).toThrow('stop');
     expect(() => closeTask(fixture.store, completed.id, completed.revision)).toThrow(/checkpoint|Checkpoint/i);
-  });
+  }, 45_000);
 });

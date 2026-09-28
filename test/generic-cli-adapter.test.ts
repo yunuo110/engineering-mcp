@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import './fixtures/worker-process-unit-seam.ts';
 import { GenericCliAdapter, promptWrapper } from '../src/adapters/generic-cli-adapter.ts';
 import { buildWorkerRequest, ewpRequestSchema, ewpResultSchema } from '../src/adapters/ewp.ts';
 import { cliAdapterManifestSchema, validateManifest, expandTrustedVariables } from '../src/adapters/manifest.ts';
