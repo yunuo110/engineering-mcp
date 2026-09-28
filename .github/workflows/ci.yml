@@ -53,6 +53,7 @@ jobs:
           test/c2c-controlled-launch.test.ts
           test/restricted-worker-launch.test.ts
           test/repository-occupancy.test.ts
+          test/configure-windows-acl.test.ts
           test/witness-security-source.test.ts
           test/generic-cli-adapter.test.ts
 

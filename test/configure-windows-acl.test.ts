@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, linkSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, linkSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -340,7 +340,7 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
       );
       expect(existsSync(item.config)).toBe(false);
     }
-  });
+  }, 90_000);
 
   it('accepts byte-identical SOURCE artifacts only when their authorization is identical', () => {
     const item = recoveryFixture();
@@ -431,22 +431,43 @@ describe.skipIf(process.platform !== 'win32')('Safe Configure Windows authorizat
     const duplicate = duplicateSourcePath(item.sourceBackup, 'owner-divergent');
     copyFileSync(item.sourceBackup, duplicate);
     copyAuthorization(item.sourceBackup, duplicate);
+    const sourceAuthorization = authorization(item.sourceBackup);
+    const alternateOwner = sourceAuthorization.owner_sid === 'S-1-5-18'
+      ? { sid: 'S-1-5-32-544', sddl: 'O:BA' }
+      : { sid: 'S-1-5-18', sddl: 'O:SY' };
+    expect(alternateOwner.sid).not.toBe(sourceAuthorization.owner_sid);
+    const canonicalDuplicate = realpathSync.native(duplicate);
+    let divergentOwnerInjected = false;
 
-    expectConfigureError(
+    const error = expectConfigureError(
       () => applyConfigurePlanIdentity(item.identity, {
         hooks: {
-          observeWindowsAuthorization: ({ path, actual }) => path === duplicate
-            ? {
-                ...actual,
-                owner_sddl: 'O:BA',
-                combined_sddl: `O:BA${actual.dacl_sddl}`,
-                owner_sid: 'S-1-5-32-544',
-              }
-            : actual,
+          observeWindowsAuthorization: ({ path, actual }) => {
+            if (realpathSync.native(path) !== canonicalDuplicate) return actual;
+            divergentOwnerInjected = true;
+            expect(actual.owner_sid).toBe(sourceAuthorization.owner_sid);
+            expect(actual.dacl_binary_base64).toBe(sourceAuthorization.dacl_binary_base64);
+            expect(actual.access_rules_protected).toBe(sourceAuthorization.access_rules_protected);
+            return {
+              ...actual,
+              owner_sddl: alternateOwner.sddl,
+              combined_sddl: `${alternateOwner.sddl}${actual.dacl_sddl}`,
+              owner_sid: alternateOwner.sid,
+            };
+          },
         },
       }),
       'CONFIGURE_MANUAL_RECOVERY_REQUIRED',
     );
+    expect(divergentOwnerInjected).toBe(true);
+    const conflicts = error.details!.conflicting_source_authorizations as Array<{
+      authorization: { fingerprint: string; owner_sid: string | null;
+        dacl_binary_base64: string | null; access_rules_protected: boolean };
+    }>;
+    expect(new Set(conflicts.map((entry) => entry.authorization.fingerprint)).size).toBe(2);
+    expect(new Set(conflicts.map((entry) => entry.authorization.owner_sid)).size).toBe(2);
+    expect(new Set(conflicts.map((entry) => entry.authorization.dacl_binary_base64)).size).toBe(1);
+    expect(new Set(conflicts.map((entry) => entry.authorization.access_rules_protected)).size).toBe(1);
     expect(existsSync(item.config)).toBe(false);
   });
 
