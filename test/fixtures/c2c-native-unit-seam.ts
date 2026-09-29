@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { ChildProcess, ChildProcessWithoutNullStreams, SpawnOptions } from 'node:child_process';
 import { vi } from 'vitest';
 import type { TrustedRuntimeBinding } from '../../src/orchestration/trusted-runtime.ts';
+import { validateIdentityFrame } from '../../src/orchestration/development-identity-channel.ts';
 
 // Vitest-only native boundary. No process, identity, ACL or Job is created here.
 // Store transactions, witness reservation files, Runner and lifecycle stay real.
@@ -13,6 +14,9 @@ const seam = vi.hoisted(() => ({
   binding: undefined as TrustedRuntimeBinding | undefined,
   preflightError: undefined as Error | undefined,
   witness: undefined as undefined | ((store: string, repo: string, dispatch: string, instance: string) => unknown),
+  protectedMode: false,
+  credentialFrame: undefined as Buffer | undefined,
+  credentialError: undefined as Error | undefined,
 }));
 vi.mock('node:child_process', async (original) => ({
   ...await original<typeof import('node:child_process')>(),
@@ -28,7 +32,25 @@ vi.mock('../../src/orchestration/trusted-runtime.ts', async (original) => ({
     if (!seam.binding) throw new Error('Unit runtime binding was not configured');
     return seam.binding;
   }),
+  isProtectedExecutionMode: vi.fn(() => seam.protectedMode),
 }));
+vi.mock('../../src/orchestration/production-credential.ts', () => ({
+  acquireProductionIdentityFrame: vi.fn(() => {
+    if (seam.credentialError) throw seam.credentialError;
+    if (!seam.credentialFrame) throw new Error('Unit credential frame absent');
+    const frame = seam.credentialFrame;
+    seam.credentialFrame = undefined;
+    try { validateIdentityFrame(frame); }
+    catch (error) { frame.fill(0); throw error; }
+    return frame;
+  }),
+}));
+vi.mock('../../src/orchestration/witness-security.ts', async (original) => {
+  const actual = await original<typeof import('../../src/orchestration/witness-security.ts')>();
+  return { ...actual, witnessSecurity: vi.fn((...args: Parameters<typeof actual.witnessSecurity>) => {
+    if (!seam.protectedMode) actual.witnessSecurity(...args);
+  }) };
+});
 vi.mock('../../src/orchestration/execution-group.ts', async (original) => ({
   ...await original<typeof import('../../src/orchestration/execution-group.ts')>(),
   // Do not mock reservation or drain/admission. This observation is synthetic.
@@ -54,10 +76,13 @@ type Fixture = {
 const fixtures = new Map<string, Fixture>();
 export const unitBootstrap = {
   launches: [] as UnitBootstrapLaunch[],
+  transfers: [] as Buffer[],
   attempts: 0,
   spawnError: undefined as Error | undefined,
   observed: true,
   errors: [] as unknown[],
+  get preflightError() { return seam.preflightError; },
+  set preflightError(value: Error | undefined) { seam.preflightError = value; },
 };
 
 export function syntheticIdentityFrame(): Buffer {
@@ -81,6 +106,9 @@ export function syntheticChild(pid = 1234): SyntheticChild {
 }
 
 export function configureUnitWorker(spawn: NonNullable<typeof seam.worker>): void { seam.worker = spawn; }
+export function configureUnitProductionCredential(frame?: Buffer, error?: Error): void {
+  seam.protectedMode = true; seam.credentialFrame = frame; seam.credentialError = error;
+}
 
 export function configureUnitBootstrap(fixture: Fixture): void {
   fixtures.set(fixture.storePath, fixture);
@@ -89,6 +117,7 @@ export function configureUnitBootstrap(fixture: Fixture): void {
     root, bootstrapHelper: join(root, 'execution-bootstrap.exe'), nodePath: join(root, 'node.exe'),
     runnerEntry: join(root, 'c2c-worker-runner-entry.js'), keeperPath: join(root, 'execution-keeper.exe'),
     keeperSid: 'UNIT_ONLY_NOT_A_WINDOWS_SID',
+    repositoryPath: fixture.repoRoot, ledgerPath: fixture.storePath,
   } as TrustedRuntimeBinding;
   seam.spawn = (command, args, options) => {
     unitBootstrap.attempts++;
@@ -101,6 +130,7 @@ export function configureUnitBootstrap(fixture: Fixture): void {
     const configured = fixtures.get(storePath);
     if (!configured || configured.repoRoot !== repoRoot) throw new Error('Unbound unit bootstrap fixture');
     const child = syntheticChild(4000 + unitBootstrap.launches.length);
+    child.stdin.on('data', (chunk: Buffer) => { unitBootstrap.transfers.push(Buffer.from(chunk)); });
     (child.stdin as PassThrough).resume();
     let finish!: () => void;
     let running: Promise<void> | undefined;
@@ -132,7 +162,10 @@ export async function settleUnitBootstraps(): Promise<void> {
 }
 export function resetUnitBootstrap(): void {
   fixtures.clear(); unitBootstrap.launches.length = 0; unitBootstrap.attempts = 0;
+  for (const frame of unitBootstrap.transfers.splice(0)) frame.fill(0);
   unitBootstrap.spawnError = undefined; unitBootstrap.observed = true; unitBootstrap.errors.length = 0;
   seam.spawn = undefined; seam.worker = undefined; seam.binding = undefined;
   seam.preflightError = undefined; seam.witness = undefined;
+  seam.protectedMode = false; seam.credentialFrame?.fill(0);
+  seam.credentialFrame = undefined; seam.credentialError = undefined;
 }

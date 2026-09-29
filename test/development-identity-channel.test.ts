@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { closeSync, openSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { oneTimeIdentityFrame } from '../src/orchestration/development-identity-channel.ts';
+import { oneTimeIdentityFrame, validateIdentityFrame } from '../src/orchestration/development-identity-channel.ts';
 
 const moduleUrl = new URL('../src/orchestration/development-identity-channel.ts', import.meta.url).href;
 function syntheticFrame(): Buffer {
@@ -26,6 +26,19 @@ async function channel(bytes: Buffer): Promise<{ code: number | null; stdout: st
   });
 }
 describe('dedicated development identity pipe', () => {
+  it('preserves the existing valid frame bytes and refuses invalid encoding and trailing bytes', () => {
+    const valid = syntheticFrame();
+    const before = Buffer.from(valid);
+    expect(() => validateIdentityFrame(valid)).not.toThrow();
+    expect(valid.equals(before)).toBe(true);
+    const truncated = valid.subarray(0, valid.length - 1);
+    const trailing = Buffer.concat([valid, Buffer.from([0])]);
+    const empty = Buffer.from(valid); empty.writeUInt32LE(0, 0);
+    const oversized = Buffer.from(valid); oversized.writeUInt32LE(257, 0);
+    for (const frame of [truncated, trailing, empty, oversized])
+      expect(() => validateIdentityFrame(frame)).toThrow('IDENTITY_FRAME_REFUSED');
+    valid.fill(0); before.fill(0); empty.fill(0); oversized.fill(0);
+  });
   it('accepts the four-field bounded pipe, not MCP stdin', async () => {
     const bytes = syntheticFrame(); const result = await channel(bytes);
     expect(result.code).toBe(0); expect(result.stdout.trim()).toBe(`FRAME_LENGTH=${bytes.length}`);

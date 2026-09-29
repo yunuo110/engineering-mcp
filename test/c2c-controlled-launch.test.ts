@@ -1,4 +1,5 @@
-import { configureUnitBootstrap, resetUnitBootstrap, settleUnitBootstraps,
+import { configureUnitBootstrap, configureUnitProductionCredential,
+  resetUnitBootstrap, settleUnitBootstraps,
   syntheticIdentityFrame, unitBootstrap } from './fixtures/c2c-native-unit-seam.ts';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -113,6 +114,106 @@ function setupIntent() {
 
 // These are native-boundary units, not cross-SID/Job acceptance or public E2E.
 describe('controlled bootstrap unit: reservation and claim authority', () => {
+  it('refuses a missing development frame without witness or launch request', () => {
+    const { repo, store, dispatchId } = setupIntent();
+    configureUnitBootstrap({ storePath: store.path, repoRoot: repo, onRunner() {} });
+    const before = store.getTask(store.getDispatchRun(dispatchId)!.task_id)!;
+    const events = store.listEvents(before.id).length;
+    const result = launchControlledC2CWorker(store, repo, dispatchId);
+    expect(result.state).toBe('REFUSED');
+    expect(unitBootstrap.attempts).toBe(0);
+    expect(store.getRepositoryLaunchState(dispatchId)).not.toBe('REQUESTED');
+    expect(store.getDispatchRun(dispatchId)?.status).toBe('launching');
+    expect(store.getTask(before.id)).toMatchObject({ status: 'READY', revision: before.revision });
+    expect(store.listEvents(before.id)).toHaveLength(events);
+    expect(() => readFileSync(executionWitnessPath(store.path, dispatchId))).toThrow();
+  });
+
+  it('refuses a development frame in protected mode and clears it before any reservation', () => {
+    const { repo, store, dispatchId } = setupIntent();
+    configureUnitBootstrap({ storePath: store.path, repoRoot: repo, onRunner() {} });
+    configureUnitProductionCredential();
+    const supplied = syntheticIdentityFrame();
+    const result = launchControlledC2CWorker(store, repo, dispatchId,
+      { developmentIdentityFrame: supplied });
+    expect(result.state).toBe('REFUSED');
+    expect(supplied.every((byte) => byte === 0)).toBe(true);
+    expect(unitBootstrap.attempts).toBe(0);
+    expect(store.getRepositoryLaunchState(dispatchId)).not.toBe('REQUESTED');
+    expect(() => readFileSync(executionWitnessPath(store.path, dispatchId))).toThrow();
+  });
+
+  it.each(['missing credential blob', 'credential ACL invalid', 'credential helper hash mismatch'])(
+    'refuses protected preflight %s before credential acquisition or launch mutation', (cause) => {
+    const { repo, store, dispatchId } = setupIntent();
+    configureUnitBootstrap({ storePath: store.path, repoRoot: repo, onRunner() {} });
+    configureUnitProductionCredential();
+    const before = store.getTask(store.getDispatchRun(dispatchId)!.task_id)!;
+    const events = store.listEvents(before.id).length;
+    unitBootstrap.preflightError = new Error(cause);
+    const result = launchControlledC2CWorker(store, repo, dispatchId);
+    expect(result.state).toBe('REFUSED');
+    expect(unitBootstrap.attempts).toBe(0);
+    expect(store.getRepositoryLaunchState(dispatchId)).not.toBe('REQUESTED');
+    expect(store.getDispatchRun(dispatchId)?.status).toBe('launching');
+    expect(store.getTask(before.id)).toMatchObject({ status: 'READY', revision: before.revision });
+    expect(store.listEvents(before.id)).toHaveLength(events);
+    expect(() => readFileSync(executionWitnessPath(store.path, dispatchId))).toThrow();
+    });
+
+  it('refuses malformed protected helper plaintext before reservation and zeroes it', () => {
+    const { repo, store, dispatchId } = setupIntent();
+    configureUnitBootstrap({ storePath: store.path, repoRoot: repo, onRunner() {} });
+    const invalid = syntheticIdentityFrame();
+    invalid.writeUInt32LE(257, 0);
+    configureUnitProductionCredential(invalid);
+    const before = store.getTask(store.getDispatchRun(dispatchId)!.task_id)!;
+    const events = store.listEvents(before.id).length;
+    const result = launchControlledC2CWorker(store, repo, dispatchId);
+    expect(result.state).toBe('REFUSED');
+    expect(invalid.every((byte) => byte === 0)).toBe(true);
+    expect(unitBootstrap.attempts).toBe(0);
+    expect(store.getRepositoryLaunchState(dispatchId)).not.toBe('REQUESTED');
+    expect(store.getDispatchRun(dispatchId)?.status).toBe('launching');
+    expect(store.getTask(before.id)).toMatchObject({ status: 'READY', revision: before.revision });
+    expect(store.listEvents(before.id)).toHaveLength(events);
+    expect(() => readFileSync(executionWitnessPath(store.path, dispatchId))).toThrow();
+  });
+
+  it.each(['DPAPI unseal failure', 'tampered credential blob'])(
+    'refuses protected %s without durable launch mutation', (cause) => {
+    const { repo, store, dispatchId } = setupIntent();
+    configureUnitBootstrap({ storePath: store.path, repoRoot: repo, onRunner() {} });
+    configureUnitProductionCredential(undefined, new Error(cause));
+    const before = store.getTask(store.getDispatchRun(dispatchId)!.task_id)!;
+    const events = store.listEvents(before.id).length;
+    const observations: string[] = [];
+    const result = launchControlledC2CWorker(store, repo, dispatchId,
+      { onPhysicalObservation: (value) => observations.push(value.kind === 'error' ? value.message : value.kind) });
+    expect(result.state).toBe('REFUSED');
+    expect(observations).toEqual(['production credential acquisition refused launch']);
+    expect(unitBootstrap.attempts).toBe(0);
+    expect(store.getRepositoryLaunchState(dispatchId)).not.toBe('REQUESTED');
+    expect(store.getDispatchRun(dispatchId)?.status).toBe('launching');
+    expect(store.getTask(before.id)).toMatchObject({ status: 'READY', revision: before.revision });
+    expect(store.listEvents(before.id)).toHaveLength(events);
+    expect(() => readFileSync(executionWitnessPath(store.path, dispatchId))).toThrow();
+    });
+
+  it('passes a fresh protected frame to the existing bootstrap seam then zeroes its source', async () => {
+    const { repo, store, dispatchId } = setupIntent();
+    configureUnitBootstrap({ storePath: store.path, repoRoot: repo, onRunner() {} });
+    const frame = syntheticIdentityFrame(); const expected = Buffer.from(frame);
+    configureUnitProductionCredential(frame);
+    const result = launchControlledC2CWorker(store, repo, dispatchId);
+    await settleUnitBootstraps();
+    expect(result.state).toBe('SPAWNED');
+    expect(unitBootstrap.attempts).toBe(1);
+    expect(unitBootstrap.transfers).toHaveLength(1);
+    expect(unitBootstrap.transfers[0]!.equals(expected)).toBe(true);
+    expect(frame.every((byte) => byte === 0)).toBe(true);
+    expected.fill(0);
+  });
   it('duplicate launch requests and duplicate claims produce one claim and one unit execution sentinel', async () => {
     const { repo, store, dispatchId } = setupIntent();
     const sentinelDir = tempDir('eng-mcp-c2c-b2b-sentinel-');

@@ -15,9 +15,11 @@ describe('accepted trusted runtime closure', () => {
     expect(normalized.some((path) => path.endsWith('/dist/orchestration/trusted-runtime.js'))).toBe(true);
     expect(normalized.some((path) => path.endsWith('/dist/trusted-git.js'))).toBe(true);
     expect(normalized.some((path) => path.endsWith('/dist/orchestration/worker-runner-entry.js'))).toBe(true);
-    for (const name of ['execution-bootstrap', 'execution-keeper', 'execution-worker', 'authority-git', 'execution-security']) {
-      expect(normalized.some((path) => path.endsWith(`/dist/native/${name}.exe`))).toBe(true);
+    for (const name of ['execution-bootstrap', 'execution-keeper', 'execution-worker',
+      'authority-git', 'execution-security', 'execution-credential']) {
+      expect(normalized.filter((path) => path.endsWith(`/dist/native/${name}.exe`))).toHaveLength(1);
     }
+    expect(normalized.some((path) => path.endsWith('.blob'))).toBe(false);
     expect(result.nonliteral).toEqual([]);
     expect(result.yamlCliDisposition).toBe('NOT_IN_ACCEPTED_RUNTIME_CLOSURE');
     expect(normalized.some((path) => path.endsWith('/node_modules/yaml/dist/cli.mjs'))).toBe(false);

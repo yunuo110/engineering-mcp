@@ -4,7 +4,10 @@ import { testProcessTraceEnabled, traceTestProcess } from './v2-process-trace.ts
 import { executionWitnessPath, reserveExecutionWitness,
   waitForExecutionWitness } from './execution-group.ts';
 import { boundedControlEnvironment } from './runtime-environment.ts';
-import { verifyTrustedRuntime, assertProtectedRepositoryBinding } from './trusted-runtime.ts';
+import { verifyTrustedRuntime, assertProtectedRepositoryBinding, isProtectedExecutionMode,
+  type TrustedRuntimeBinding } from './trusted-runtime.ts';
+import { acquireProductionIdentityFrame } from './production-credential.ts';
+import { validateIdentityFrame } from './development-identity-channel.ts';
 import { assertRepositoryWriterAdmission, recordRepositoryLaunchRequest } from './repository-occupancy.ts';
 import type { Store } from '../store.ts';
 import type { DispatchRun, TaskContract } from '../types.ts';
@@ -88,6 +91,12 @@ function launchWithOwnedFrame(store: Store, repoRoot: string, dispatchRunId: str
     );
   }
 
+  const protectedMode = isProtectedExecutionMode();
+  if (protectedMode && options.developmentIdentityFrame !== undefined) {
+    options.onPhysicalObservation?.({ kind: 'error', message: 'production credential acquisition refused launch' });
+    return { state: 'REFUSED', dispatch, task, pid: null };
+  }
+
   const instanceId = randomUUID();
   let binding: ReturnType<typeof verifyTrustedRuntime>;
   try {
@@ -100,11 +109,28 @@ function launchWithOwnedFrame(store: Store, repoRoot: string, dispatchRunId: str
       error_class: error instanceof Error ? error.name : 'unknown' });
     return { state: 'REFUSED', dispatch, task, pid: null };
   }
-  const frame = options.developmentIdentityFrame;
-  if (!frame || frame.length < 16) {
-    options.onPhysicalObservation?.({ kind: 'error', message: 'development identity channel absent' });
+  let frame: Buffer;
+  try {
+    if (protectedMode) frame = acquireProductionIdentityFrame(binding);
+    else {
+      if (!options.developmentIdentityFrame) throw new Error('IDENTITY_FRAME_REFUSED');
+      frame = options.developmentIdentityFrame;
+      validateIdentityFrame(frame);
+    }
+  } catch {
+    options.onPhysicalObservation?.({ kind: 'error', message: protectedMode
+      ? 'production credential acquisition refused launch' : 'development identity channel absent' });
     return { state: 'REFUSED', dispatch, task, pid: null };
   }
+  try {
+    return launchWithVerifiedFrame(store, repoRoot, dispatchRunId, options,
+      binding, instanceId, dispatch, task, frame);
+  } finally { frame.fill(0); }
+}
+
+function launchWithVerifiedFrame(store: Store, repoRoot: string, dispatchRunId: string,
+  options: ControlledC2CLaunchOptions, binding: TrustedRuntimeBinding, instanceId: string,
+  dispatch: DispatchRun, task: TaskContract, frame: Buffer): ControlledC2CLaunchResult {
   try {
     const reserved = store.transact(() => {
       assertRepositoryWriterAdmission(store, repoRoot, { currentDispatchId: dispatchRunId });
@@ -146,7 +172,6 @@ function launchWithOwnedFrame(store: Store, repoRoot: string, dispatchRunId: str
       },
     );
   } catch (error) {
-    frame.fill(0);
     // Once physical launch was requested, retain the exclusive reservation;
     // a launcher exception is not authoritative proof that no child exists.
     traceTestProcess('bootstrap_spawn_throw', { dispatch_run_id: dispatchRunId,
@@ -163,11 +188,13 @@ function launchWithOwnedFrame(store: Store, repoRoot: string, dispatchRunId: str
   // stream writes can outlive this synchronous call. Own a separate bounded
   // buffer until its write callback; the caller's frame is always cleared.
   const transferFrame = Buffer.from(frame);
+  frame.fill(0);
   const clearFrame = () => transferFrame.fill(0);
   if (child.stdin) {
     child.stdin.once('error', clearFrame);
     child.stdin.once('close', clearFrame);
-    child.stdin.end(transferFrame, clearFrame);
+    try { child.stdin.end(transferFrame, clearFrame); }
+    catch { clearFrame(); return { state: 'REFUSED', dispatch, task, pid: null }; }
   } else {
     clearFrame();
   }

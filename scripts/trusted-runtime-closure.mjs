@@ -19,6 +19,7 @@ const acceptedEntries = [
   join(root, 'dist', 'native', 'execution-worker.exe'),
   join(root, 'dist', 'native', 'authority-git.exe'),
   join(root, 'dist', 'native', 'execution-security.exe'),
+  join(root, 'dist', 'native', 'execution-credential.exe'),
 ];
 const allowedPackages = new Set(['@modelcontextprotocol/server', '@modelcontextprotocol/core',
   'zod', 'smol-toml', 'yaml']);

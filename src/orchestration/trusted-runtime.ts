@@ -5,13 +5,15 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boundedControlEnvironment } from './runtime-environment.ts';
 
-const CONFIG_SCHEMA = 'engineering-v2-trusted-launch/2';
-const MANIFEST_SCHEMA = 'engineering-v2-trusted-runtime/2';
+const CONFIG_SCHEMA = 'engineering-v2-trusted-launch/3';
+const MANIFEST_SCHEMA = 'engineering-v2-trusted-runtime/3';
 const HELPER_BUILD = 'engineering-execution-bootstrap/2';
 const KEEPER_BUILD = 'engineering-execution-keeper/1';
 const SECURITY_BUILD = 'engineering-execution-security/1';
+const CREDENTIAL_BUILD = 'engineering-execution-credential/1';
 const SHA = /^[0-9A-F]{64}$/;
 const RX = 1179817;
+const READ = 1179785;
 const FULL = 2032127;
 
 type Artifact = { path: string; sha256: string; length: number; role: string };
@@ -41,6 +43,8 @@ export type TrustedRuntimeBinding = {
   workerLauncherPath: string;
   authorityGitPath: string;
   securityHelperPath: string;
+  credentialHelperPath: string;
+  credentialBlobPath: string;
   repositoryPath: string;
   ledgerPath: string;
 };
@@ -134,6 +138,25 @@ function assertControlAcl(row: Acl, operatorSid: string, coreSid: string,
   if ([...expected.keys()].length !== 0) fail(`control ACE missing: ${row.path}`);
 }
 
+/** Exact protected ACL for an externally provisioned credential object. */
+export function assertProtectedCredentialAcl(row: ProtectedPathAcl, kind: 'directory' | 'file',
+  identity: Pick<TrustedRuntimeBinding, 'operatorSid' | 'coreSid' | 'keeperSid' | 'workerSid'>): void {
+  const expected = new Map([[identity.operatorSid, FULL], ['S-1-5-18', FULL],
+    [identity.coreSid, kind === 'directory' ? RX : READ]]);
+  if (expected.size !== 3 || expected.has(identity.keeperSid) || expected.has(identity.workerSid)
+    || identity.keeperSid === identity.workerSid) fail('credential SID collision');
+  if (row.owner !== identity.operatorSid || !row.protected || row.reparse
+    || !Array.isArray(row.aces) || row.aces.length !== 3)
+    fail('credential owner/ACL mismatch');
+  for (const ace of row.aces) {
+    if (ace.type !== 'Allow' || ace.inherited || ace.inheritOnly || ace.containerInherit
+      || ace.objectInherit || !Number.isInteger(ace.rights) || expected.get(ace.sid) !== ace.rights)
+      fail('credential ACE mismatch');
+    expected.delete(ace.sid);
+  }
+  if ([...expected.keys()].length !== 0) fail('credential ACE missing');
+}
+
 type LedgerAclKind = 'directory' | 'file' | 'ancestor';
 type LedgerAclIdentity = Pick<TrustedRuntimeBinding, 'coreSid' | 'keeperSid' | 'workerSid' | 'operatorSid'>
   & { trustedInstallerSid?: string };
@@ -215,7 +238,7 @@ export function trustedRuntimeRootFromModule(): string {
   return dirname(dirname(dirname(path)));
 }
 
-/** No child process is launched by this verifier. A failure is terminal for launch. */
+/** Fail-closed verifier. Only fixed attested helpers are launched for build and ACL probes. */
 export function verifyTrustedRuntime(root = trustedRuntimeRootFromModule()): TrustedRuntimeBinding {
   if (process.platform !== 'win32') fail('Windows runtime required');
   if (!isAbsolute(root) || !existsSync(root) || lstatSync(root).isSymbolicLink())
@@ -227,7 +250,8 @@ export function verifyTrustedRuntime(root = trustedRuntimeRootFromModule()): Tru
   if (config.schema !== CONFIG_SCHEMA || manifest.schema !== MANIFEST_SCHEMA
     || manifest.configSchema !== CONFIG_SCHEMA || manifest.helperBuild !== HELPER_BUILD
     || manifest.keeperBuild !== KEEPER_BUILD
-    || manifest.securityHelperBuild !== SECURITY_BUILD) fail('schema/build binding mismatch');
+    || manifest.securityHelperBuild !== SECURITY_BUILD
+    || manifest.credentialHelperBuild !== CREDENTIAL_BUILD) fail('schema/build binding mismatch');
   equalPath(string(config.root, 'root'), actualRoot, 'root');
   equalPath(string(config.manifestPath, 'manifestPath'), manifestPath, 'manifest');
   equalPath(string(config.nodePath, 'nodePath'), join(actualRoot, 'node', 'node.exe'), 'Node');
@@ -247,6 +271,11 @@ export function verifyTrustedRuntime(root = trustedRuntimeRootFromModule()): Tru
     join(actualRoot, 'dist', 'native', 'authority-git.exe'), 'authority Git launcher');
   equalPath(string(config.securityHelperPath, 'securityHelperPath'),
     join(actualRoot, 'dist', 'native', 'execution-security.exe'), 'security helper');
+  const credentialHelperPath = string(config.credentialHelperPath, 'credentialHelperPath');
+  equalPath(credentialHelperPath,
+    join(actualRoot, 'dist', 'native', 'execution-credential.exe'), 'credential helper');
+  if (manifest.credentialHelperPath !== credentialHelperPath)
+    fail('credential helper binding mismatch');
   equalPath(string(config.runnerEntry, 'runnerEntry'),
     join(actualRoot, 'dist', 'orchestration', 'c2c-worker-runner-entry.js'), 'Runner');
   equalPath(string(config.profileConfigPath, 'profileConfigPath'),
@@ -271,6 +300,21 @@ export function verifyTrustedRuntime(root = trustedRuntimeRootFromModule()): Tru
     || manifest.repositoryPath !== repositoryPath || manifest.ledgerPath !== ledgerPath
     || realpathSync.native(repositoryPath).toLowerCase() !== repositoryPath.toLowerCase())
     fail('repository/ledger binding mismatch');
+  const credentialBlobPath = string(config.credentialBlobPath, 'credentialBlobPath');
+  const credentialRoot = dirname(credentialBlobPath);
+  const disallowedRoots = [actualRoot, repositoryPath, dirname(ledgerPath)];
+  if (!isAbsolute(credentialBlobPath) || credentialRoot === credentialBlobPath
+    || manifest.credentialBlobPath !== credentialBlobPath
+    || disallowedRoots.some((root) => resolve(credentialRoot).toLowerCase() === resolve(root).toLowerCase()
+      || inside(root, credentialRoot) || inside(root, credentialBlobPath)))
+    fail('credential path binding invalid');
+  try {
+    if (!lstatSync(credentialRoot).isDirectory() || lstatSync(credentialRoot).isSymbolicLink()
+      || !lstatSync(credentialBlobPath).isFile() || lstatSync(credentialBlobPath).isSymbolicLink()
+      || realpathSync.native(credentialRoot).toLowerCase() !== resolve(credentialRoot).toLowerCase()
+      || realpathSync.native(credentialBlobPath).toLowerCase() !== resolve(credentialBlobPath).toLowerCase())
+      fail('credential object type/redirect mismatch');
+  } catch { fail('credential object absent or redirected'); }
   const stagedPackage = readJson(join(actualRoot, 'package.json'));
   if (manifest.packageVersion !== stagedPackage.version) fail('Core package version mismatch');
   const profiles = readJson(string(config.profileConfigPath, 'profileConfigPath'));
@@ -309,13 +353,23 @@ export function verifyTrustedRuntime(root = trustedRuntimeRootFromModule()): Tru
       || lstatSync(entry.path).size !== entry.length || fileHash(entry.path) !== entry.sha256)
       fail(`artifact hash/path mismatch: ${entry.path}`);
   }
+  if (!internalEntries.has(resolve(credentialHelperPath).toLowerCase()))
+    fail('credential helper absent from manifest');
+  try {
+    const build = execFileSync(credentialHelperPath, ['--version'], {
+      encoding: 'utf8', windowsHide: true, maxBuffer: 128, timeout: 5000,
+      env: boundedControlEnvironment(), stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (build.trim() !== CREDENTIAL_BUILD) fail('credential helper build mismatch');
+  } catch { fail('credential helper build refused'); }
   const controlPaths = [dirname(actualRoot), ...directories(actualRoot), manifestPath, ...internalFiles];
   const externalPaths = [gitInstallRoot, dirname(gitPath), gitPath, gitExecPath];
   // A missing first ledger file is checked through its existing parent. Every
   // later binding/admission check reruns this inventory after Store.open, and
   // then validates the actual SQLite file and sidecar ACLs too.
   const ledgerPaths = ledgerAclInventory(ledgerPath);
-  const probe = aclSnapshot([...controlPaths, ...externalPaths, ...ledgerPaths.map((entry) => entry.path)],
+  const probe = aclSnapshot([...controlPaths, ...externalPaths, ...ledgerPaths.map((entry) => entry.path),
+    credentialRoot, credentialBlobPath],
     config.securityHelperPath as string);
   if (probe.sid !== coreSid) fail('process is not the bound Core identity');
   for (let index = 0; index < controlPaths.length; index++)
@@ -333,6 +387,13 @@ export function verifyTrustedRuntime(root = trustedRuntimeRootFromModule()): Tru
     assertProtectedLedgerAcl(probe.rows[controlPaths.length + externalPaths.length + index]!, entry.kind,
       { coreSid, keeperSid, workerSid, operatorSid, trustedInstallerSid: probe.trustedInstallerSid });
   }
+  const credentialOffset = controlPaths.length + externalPaths.length + ledgerPaths.length;
+  equalPath(probe.rows[credentialOffset]!.path, credentialRoot, 'credential root');
+  equalPath(probe.rows[credentialOffset + 1]!.path, credentialBlobPath, 'credential blob');
+  assertProtectedCredentialAcl(probe.rows[credentialOffset]!, 'directory',
+    { operatorSid, coreSid, keeperSid, workerSid });
+  assertProtectedCredentialAcl(probe.rows[credentialOffset + 1]!, 'file',
+    { operatorSid, coreSid, keeperSid, workerSid });
   if (resolve(process.execPath).toLowerCase() !== resolve(string(config.nodePath, 'nodePath')).toLowerCase())
     fail('Node executable is not staged Node');
   return {
@@ -357,6 +418,8 @@ export function verifyTrustedRuntime(root = trustedRuntimeRootFromModule()): Tru
     workerLauncherPath: config.workerLauncherPath as string,
     authorityGitPath: config.authorityGitPath as string,
     securityHelperPath: config.securityHelperPath as string,
+    credentialHelperPath,
+    credentialBlobPath,
     repositoryPath,
     ledgerPath,
   };
