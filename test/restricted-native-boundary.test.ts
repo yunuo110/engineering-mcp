@@ -22,7 +22,8 @@ describe('native restricted launch failure ownership', () => {
         administrator_attribute_rejections: { worker: 4, keeper: 4 },
         non_administrator_group_unit: { worker: 1, keeper: 1 },
         owned_stdin_closed: 2, blocked_pipe_cancelled: 2,
-        logon_command_boundaries: 4, explicit_environment_blocks: 2,
+        logon_command_boundaries: 4, explicit_environment_blocks: 1,
+        profile_backed_worker_contract: 1,
         real_alternate_identity: 'NOT_RUN' });
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });

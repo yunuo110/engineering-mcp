@@ -79,7 +79,7 @@ describe('restricted Worker credential and process boundary', () => {
     expect(launch).toThrow('SPAWN_REFUSED'); expect(launch).toThrow('not provisioned');
     expect(spawn).toHaveBeenCalledTimes(1);
   });
-  it('uses the fixed helper, explicit bounded environment and pipe prefix without exposing credentials in argv', async () => {
+  it('uses the fixed Core-side helper, its bounded environment and pipe prefix without exposing credentials in argv', async () => {
     prepare(); const received: Buffer[] = [];
     state.child.stdin.on('data', (data: Buffer) => received.push(Buffer.from(data)));
     initializeRestrictedWorkerIdentityFromStdin(); const child = launch();

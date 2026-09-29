@@ -1,0 +1,44 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+describe('execution-worker pre/post Userenv profile boundary', () => {
+  it('checks registration before launch and the suspended child binding before resume', () => {
+    const source = readFileSync(resolve('src/native/execution-worker.cs'), 'utf8');
+    expect(source).toContain('LogonUserW');
+    expect(source).toContain('GetUserProfileDirectoryW');
+    expect(source).toContain('LogonWithProfile');
+    expect(source).toContain('Suspended|NoWindow,IntPtr.Zero,cwd');
+    expect(source).toContain('PROFILE_NOT_PROVISIONED');
+    expect(source).toContain('PROFILE_BINDING_REFUSED');
+    expect(source).toContain('RequireNonInheritable(profileToken,"WORKER_TOKEN_INHERITANCE")');
+    expect(source).toContain('RequireNonInheritable(excluded,"WORKER_UNRELATED_HANDLE_INHERITANCE")');
+    expect(source).toContain('OpenProcessToken(child.process,TokenQuery,out childToken)');
+    expect(source).toContain('Close(ref childToken);Close(ref profileToken);');
+    expect(source).toContain('SetHandleInformation(raw,Inherit,0)');
+    expect(source).toContain('SetHandleInformation(GetStdHandle(which),Inherit,0)');
+    expect(source).toContain('SetHandleInformation(h,Inherit,Inherit)');
+    expect(source).toMatch(/CreateProcessWithLogonW\(user,"\.",pin\.AddrOfPinnedObject\(\),LogonWithProfile,[^;]+IntPtr\.Zero,cwd/);
+    const preflight = source.indexOf('expectedProfileRoot=ProfileRoot(profileToken');
+    const create = source.indexOf('Check(CreateProcessWithLogonW(user');
+    const childToken = source.indexOf('OpenProcessToken(child.process');
+    const postcheck = source.indexOf('actualProfileRoot=ProfileRoot(childToken');
+    const job = source.indexOf('WORKER_JOB_ASSIGN');
+    const resume = source.indexOf('ResumeThread(child.thread)');
+    expect(preflight).toBeGreaterThan(0);
+    expect(preflight).toBeLessThan(create);
+    expect(create).toBeLessThan(childToken);
+    expect(childToken).toBeLessThan(postcheck);
+    expect(postcheck).toBeLessThan(job);
+    expect(job).toBeLessThan(resume);
+    expect(source).not.toMatch(/\b(?:CreateProfile|DeleteProfile|LoadUserProfile|ImpersonateLoggedOnUser)\s*\(/);
+    expect(source).not.toContain('HoldProfileObject');
+    expect(source).not.toContain('NTUSER.DAT');
+    expect(source).not.toContain('MinimalEnvironment');
+    expect(source).not.toMatch(/CreateProcessWithLogonW\([^;]+pin\.AddrOfPinnedObject\(\),\s*0\s*,/);
+    expect(source).toMatch(/#if TEST_FAULT\s+profileExpectedRoot=expectedProfileRoot;\s+profilePhase="BARRIER";\s+ProfileLaunchFaultBarrier\(\);\s+#endif/);
+    const release = readFileSync(resolve('dist/native/execution-worker.exe'));
+    expect(release.includes(Buffer.from('ENGINEERING_R5E_READY_EVENT'))).toBe(false);
+    expect(release.includes(Buffer.from('ENGINEERING_R5E_RELEASE_EVENT'))).toBe(false);
+  });
+});

@@ -9,13 +9,17 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
+#if TEST_FAULT
+using System.Threading;
+#endif
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using Microsoft.Win32.SafeHandles;
 
 internal static class ExecutionWorker {
   const string Build = "engineering-execution-worker/1";
-  const uint Suspended = 4, NoWindow = 0x08000000, UnicodeEnvironment = 0x400;
+  const uint Suspended = 4, NoWindow = 0x08000000, LogonWithProfile = 1;
+  const int InteractiveLogon=2, DefaultProvider=0;
   const uint TokenQuery = 8, ProcessQuery = 0x1000, ProcessDuplicate = 0x40;
   const uint JobAssignQuery = 5, Inherit = 1;
   [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct STARTUPINFO {
@@ -34,6 +38,7 @@ internal static class ExecutionWorker {
   }
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CreatePipe(out IntPtr read,out IntPtr write,IntPtr attributes,int size);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetHandleInformation(IntPtr handle,uint mask,uint flags);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetHandleInformation(IntPtr handle,out uint flags);
   [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GetStdHandle(int which);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetStdHandle(int which,IntPtr handle);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CancelIoEx(IntPtr handle,IntPtr overlapped);
@@ -52,6 +57,8 @@ internal static class ExecutionWorker {
   [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
   [DllImport("advapi32.dll")] static extern IntPtr GetSidSubAuthority(IntPtr sid,uint index);
   [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcessWithLogonW(string username,string domain,IntPtr password,uint flags,string executable,StringBuilder command,uint creationFlags,IntPtr environment,string cwd,ref STARTUPINFO startup,out PROCESS_INFORMATION process);
+  [DllImport("advapi32.dll",EntryPoint="LogonUserW",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool LogonUser(string user,string domain,IntPtr password,int logonType,int provider,out IntPtr token);
+  [DllImport("userenv.dll",EntryPoint="GetUserProfileDirectoryW",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool GetUserProfileDirectory(IntPtr token,StringBuilder path,ref uint size);
 
   static void Check(bool ok,string code) { if(!ok)throw new Win32Exception(Marshal.GetLastWin32Error(),code); }
   static void Close(ref IntPtr h) { if(h!=IntPtr.Zero){CloseHandle(h);h=IntPtr.Zero;} }
@@ -104,9 +111,6 @@ internal static class ExecutionWorker {
   static void ValidateLogonCommand(StringBuilder command) {
     if(command.Length>1024)throw new InvalidOperationException("LOGON_COMMAND_LENGTH");
   }
-  static IntPtr MinimalEnvironment() {
-    return Marshal.StringToHGlobalUni("HOMEDRIVE=C:\0HOMEPATH=\\\0SystemRoot=C:\\Windows\0\0");
-  }
   static byte[] ReadExact(Stream input,int length) {
     byte[] result=new byte[length];
     try { int offset=0; while(offset<length){int n=input.Read(result,offset,length-offset);if(n==0)throw new EndOfStreamException();offset+=n;}return result; }
@@ -140,10 +144,7 @@ internal static class ExecutionWorker {
         throw new InvalidOperationException("WORKER_ADMIN_GROUP");
     }
   }
-  static string Sid(IntPtr process,bool restricted) {
-    IntPtr token=IntPtr.Zero;
-    try {
-      Check(OpenProcessToken(process,TokenQuery | 2,out token),"TOKEN_QUERY");
+  static string TokenSid(IntPtr token,bool restricted) {
       using(var identity=new WindowsIdentity(token)) {
         if(identity.User==null)throw new InvalidOperationException("TOKEN_USER");
         if(restricted) {
@@ -172,8 +173,59 @@ internal static class ExecutionWorker {
         }
         return identity.User.Value;
       }
+  }
+  static string Sid(IntPtr process,bool restricted) {
+    IntPtr token=IntPtr.Zero;
+    try {
+      Check(OpenProcessToken(process,TokenQuery | 2,out token),"TOKEN_QUERY");
+      return TokenSid(token,restricted);
     } finally {Close(ref token);}
   }
+  static string ProfileRoot(IntPtr token,string refusal) {
+    uint length=4096;var path=new StringBuilder((int)length);
+    if(!GetUserProfileDirectory(token,path,ref length)) {
+#if TEST_FAULT
+      profileWin32Error=Marshal.GetLastWin32Error();
+#endif
+      throw new InvalidOperationException(refusal);
+    }
+    string raw=path.ToString();
+    if(length<2||length>(uint)path.Capacity||raw.Length<3||raw.IndexOf('\0')>=0||
+      !Char.IsLetter(raw[0])||raw[1]!=':'||(raw[2]!='\\'&&raw[2]!='/'))
+      throw new InvalidOperationException(refusal);
+    try {
+      string full=Path.GetFullPath(raw);
+      if(full.Length>4096||!Path.IsPathRooted(full)||String.IsNullOrEmpty(Path.GetPathRoot(full)))
+        throw new InvalidOperationException(refusal);
+      return full;
+    } catch(ArgumentException) {throw new InvalidOperationException(refusal);}
+      catch(NotSupportedException) {throw new InvalidOperationException(refusal);}
+      catch(PathTooLongException) {throw new InvalidOperationException(refusal);}
+  }
+  static void RequireNonInheritable(IntPtr handle,string refusal) {
+    uint flags;Check(GetHandleInformation(handle,out flags),refusal);
+    if((flags&Inherit)!=0)throw new InvalidOperationException(refusal);
+  }
+#if TEST_FAULT
+  // Compiled only in the isolated fault-test binary, never in release staging.
+  static string profilePhase="NOT_STARTED";
+  static int profileWin32Error=0;
+  static int profileChildPid=0;
+  static string profileExpectedRoot="NOT_OBSERVED",profileActualRoot="NOT_OBSERVED";
+  static void ProfileLaunchFaultBarrier() {
+    string ready=Environment.GetEnvironmentVariable("ENGINEERING_R5E_READY_EVENT");
+    string release=Environment.GetEnvironmentVariable("ENGINEERING_R5E_RELEASE_EVENT");
+    if(ready==null&&release==null)return;
+    if(String.IsNullOrEmpty(ready)||String.IsNullOrEmpty(release))
+      throw new InvalidOperationException("PROFILE_TEST_BARRIER_CONFIG");
+    using(var readyEvent=EventWaitHandle.OpenExisting(ready))
+    using(var releaseEvent=EventWaitHandle.OpenExisting(release)) {
+      readyEvent.Set();
+      if(!releaseEvent.WaitOne(TimeSpan.FromSeconds(20)))
+        throw new TimeoutException("PROFILE_TEST_BARRIER_TIMEOUT");
+    }
+  }
+#endif
   static FileStream Own(ref IntPtr handle,FileAccess access) {
     var owned=new SafeFileHandle(handle,true);handle=IntPtr.Zero;
     try {return new FileStream(owned,access);}
@@ -200,7 +252,8 @@ internal static class ExecutionWorker {
     byte[] username=null,password=null,configuration=null;GCHandle pin=new GCHandle();
     FileStream writer=null,reader=null,error=null;SafeFileHandle writerHandle=null;
     Task writeTask=null;
-    IntPtr runner=IntPtr.Zero,job=IntPtr.Zero,environment=IntPtr.Zero;
+    IntPtr runner=IntPtr.Zero,job=IntPtr.Zero;
+    IntPtr profileToken=IntPtr.Zero,childToken=IntPtr.Zero;
     IntPtr childRead=IntPtr.Zero,parentWrite=IntPtr.Zero,parentRead=IntPtr.Zero,childWrite=IntPtr.Zero;
     IntPtr errorRead=IntPtr.Zero,errorWrite=IntPtr.Zero;
     PROCESS_INFORMATION child=new PROCESS_INFORMATION();bool finished=false;
@@ -241,17 +294,51 @@ internal static class ExecutionWorker {
       Check(CreatePipe(out errorRead,out errorWrite,IntPtr.Zero,0),"ERROR_PIPE");
       foreach(IntPtr h in new IntPtr[]{childRead,childWrite,errorWrite})Check(SetHandleInformation(h,Inherit,Inherit),"TASK_PIPE_INHERITANCE");
       var startup=new STARTUPINFO{cb=Marshal.SizeOf(typeof(STARTUPINFO)),flags=0x100,input=childRead,output=childWrite,error=errorWrite};
-      // Fixed development values avoid CreateProcessWithLogonW's implicit
-      // HOMEDRIVE/HOMEPATH insertion; no actual account profile is represented.
-      environment=MinimalEnvironment();
       pin=GCHandle.Alloc(password,GCHandleType.Pinned);
       // Hold the exact executable open without write/delete sharing through spawn.
       using(var artifact=new FileStream(executable,FileMode.Open,FileAccess.Read,FileShare.Read)) {
         using(var hash=SHA256.Create())if(BitConverter.ToString(hash.ComputeHash(artifact)).Replace("-","").ToLowerInvariant()!=Text(config,"executableSha256"))throw new InvalidOperationException("ARTIFACT_MISMATCH");
-        try {Check(CreateProcessWithLogonW(user,".",pin.AddrOfPinnedObject(),0,executable,command,Suspended|NoWindow|UnicodeEnvironment,environment,cwd,ref startup,out child),"WORKER_CREATE");}
+        try {
+          Check(LogonUser(user,".",pin.AddrOfPinnedObject(),InteractiveLogon,DefaultProvider,out profileToken),"WORKER_LOGON");
+          RequireNonInheritable(profileToken,"WORKER_TOKEN_INHERITANCE");
+          ValidateWorkerRoles(TokenSid(profileToken,true),expected,core,keeper,operatorSid);
+#if TEST_FAULT
+          profilePhase="USERENV_PRE";
+#endif
+          string expectedProfileRoot=ProfileRoot(profileToken,"PROFILE_NOT_PROVISIONED");
+#if TEST_FAULT
+          profileExpectedRoot=expectedProfileRoot;
+          profilePhase="BARRIER";
+          ProfileLaunchFaultBarrier();
+#endif
+          // Userenv preflight checks registration. The suspended child's own
+          // token supplies the post-create binding; neither check locks ProfileList.
+          foreach(IntPtr excluded in new IntPtr[]{runner,job,inputHandle.DangerousGetHandle(),
+            parentWrite,parentRead,errorRead,artifact.SafeFileHandle.DangerousGetHandle()})
+            RequireNonInheritable(excluded,"WORKER_UNRELATED_HANDLE_INHERITANCE");
+#if TEST_FAULT
+          profilePhase="WORKER_CREATE";
+#endif
+          Check(CreateProcessWithLogonW(user,".",pin.AddrOfPinnedObject(),LogonWithProfile,executable,command,Suspended|NoWindow,IntPtr.Zero,cwd,ref startup,out child),"WORKER_CREATE");
+#if TEST_FAULT
+          profileChildPid=child.pid;
+          profilePhase="CHILD_TOKEN";
+#endif
+          Check(OpenProcessToken(child.process,TokenQuery,out childToken),"CHILD_TOKEN_QUERY");
+          ValidateWorkerRoles(TokenSid(childToken,true),expected,core,keeper,operatorSid);
+#if TEST_FAULT
+          profilePhase="USERENV_POST";
+#endif
+          string actualProfileRoot=ProfileRoot(childToken,"PROFILE_BINDING_REFUSED");
+#if TEST_FAULT
+          profileActualRoot=actualProfileRoot;
+#endif
+          if(!String.Equals(actualProfileRoot,expectedProfileRoot,StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("PROFILE_BINDING_REFUSED");
+        }
         finally {Array.Clear(password,0,password.Length);pin.Free();password=null;}
       }
-      ValidateWorkerRoles(Sid(child.process,true),expected,core,keeper,operatorSid);
+      Close(ref childToken);Close(ref profileToken);
       Check(IsProcessInJob(child.process,job,out member),"WORKER_INITIAL_JOB");
       if(!member)Check(AssignProcessToJobObject(job,child.process),"WORKER_JOB_ASSIGN");
       Check(IsProcessInJob(child.process,job,out member)&&member,"WORKER_JOB_MEMBERSHIP");
@@ -283,8 +370,8 @@ internal static class ExecutionWorker {
         finally {
           if(reader!=null)reader.Dispose();if(error!=null)error.Dispose();
           Close(ref child.thread);Close(ref child.process);Close(ref runner);Close(ref job);
+          Close(ref childToken);Close(ref profileToken);
           Close(ref childRead);Close(ref parentWrite);Close(ref parentRead);Close(ref childWrite);Close(ref errorRead);Close(ref errorWrite);
-          if(environment!=IntPtr.Zero)Marshal.FreeHGlobal(environment);
         }
       }
     }
@@ -294,6 +381,12 @@ internal static class ExecutionWorker {
       if(args.Length==1&&args[0]=="--version"){Console.WriteLine(Build);return 0;}
       if(args.Length!=1||args[0]!="--launch")throw new ArgumentException();
       return Run();
-    } catch(Exception error){Console.Error.WriteLine("WORKER_LAUNCH_REFUSED:"+error.GetType().Name);return 90;}
+    } catch(Exception error){Console.Error.WriteLine("WORKER_LAUNCH_REFUSED:"+
+      (error.Message=="PROFILE_NOT_PROVISIONED"||error.Message=="PROFILE_BINDING_REFUSED"?error.Message:error.GetType().Name)
+#if TEST_FAULT
+      +":"+profilePhase+":WIN32_"+profileWin32Error+":CHILD_PID_"+profileChildPid
+      +":EXPECTED_PROFILE_"+profileExpectedRoot+":ACTUAL_PROFILE_"+profileActualRoot
+#endif
+      );return 90;}
   }
 }

@@ -117,6 +117,12 @@ internal static class RestrictedNativeBoundaryTests {
     try{Method(type,"ValidateLogonCommand").Invoke(null,new object[]{new StringBuilder(new string('x',1025))});}
     catch(TargetInvocationException error){refused=error.InnerException is InvalidOperationException&&error.InnerException.Message=="LOGON_COMMAND_LENGTH";}
     Require(refused);
+    if(type==typeof(ExecutionWorker)) {
+      Require(Method(type,"MinimalEnvironment")==null);
+      FieldInfo flags=type.GetField("LogonWithProfile",BindingFlags.NonPublic|BindingFlags.Static);
+      Require(flags!=null&&flags.IsLiteral&&Convert.ToUInt32(flags.GetRawConstantValue())==1);
+      return;
+    }
     IntPtr environment=(IntPtr)Method(type,"MinimalEnvironment").Invoke(null,new object[0]);
     try {
       string expected="HOMEDRIVE=C:\0HOMEPATH=\\\0SystemRoot=C:\\Windows\0\0";
@@ -142,7 +148,7 @@ internal static class RestrictedNativeBoundaryTests {
       AdministratorGroups(typeof(ExecutionBootstrap),"KEEPER_ADMIN_GROUP");
       OwnedInput(typeof(ExecutionBootstrap));OwnedInput(typeof(ExecutionWorker));CancelBlockedPipe(false);CancelBlockedPipe(true);
       FixedLaunchContract(typeof(ExecutionBootstrap));FixedLaunchContract(typeof(ExecutionWorker));
-      Console.WriteLine("{\"partial_secret_clear\":2,\"exact_suspended_child_cleanup\":2,\"role_rejections\":5,\"role_acceptance_unit\":1,\"administrator_attribute_rejections\":{\"worker\":4,\"keeper\":4},\"non_administrator_group_unit\":{\"worker\":1,\"keeper\":1},\"owned_stdin_closed\":2,\"blocked_pipe_cancelled\":2,\"logon_command_boundaries\":4,\"explicit_environment_blocks\":2,\"real_alternate_identity\":\"NOT_RUN\"}");return 0;
+      Console.WriteLine("{\"partial_secret_clear\":2,\"exact_suspended_child_cleanup\":2,\"role_rejections\":5,\"role_acceptance_unit\":1,\"administrator_attribute_rejections\":{\"worker\":4,\"keeper\":4},\"non_administrator_group_unit\":{\"worker\":1,\"keeper\":1},\"owned_stdin_closed\":2,\"blocked_pipe_cancelled\":2,\"logon_command_boundaries\":4,\"explicit_environment_blocks\":1,\"profile_backed_worker_contract\":1,\"real_alternate_identity\":\"NOT_RUN\"}");return 0;
     } catch(Exception){Console.Error.WriteLine("NATIVE_BOUNDARY_TEST_FAILED");return 1;}
   }
 }
