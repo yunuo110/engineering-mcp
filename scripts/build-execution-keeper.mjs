@@ -8,7 +8,7 @@ if (process.platform === 'win32') {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const directory = join(root, 'dist', 'native');
   const names = ['execution-keeper', 'execution-bootstrap', 'execution-worker',
-    'authority-git', 'execution-security'];
+    'authority-git', 'execution-security', 'execution-credential'];
   const attestationPath = join(directory, 'native-build.json');
   const compiler = join(process.env.SystemRoot ?? 'C:\\Windows', 'Microsoft.NET',
     'Framework64', 'v4.0.30319', 'csc.exe');

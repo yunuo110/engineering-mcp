@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const names = ['execution-keeper', 'execution-bootstrap', 'execution-worker',
-  'authority-git', 'execution-security'];
+  'authority-git', 'execution-security', 'execution-credential'];
 
 describe('native build attestation', () => {
   it('verifies without rebuilding and rejects source or binary drift in an isolated copy', () => {
