@@ -44,6 +44,9 @@ jobs:
           test/native-build-attestation.test.ts
           test/runtime-environment.test.ts
           test/trusted-runtime-closure.test.ts
+          test/production-credential.test.ts
+          test/execution-credential-native.test.ts
+          test/trusted-credential-acl-windows.test.ts
           test/authority-git.test.ts
           test/execution-evidence.test.ts
           test/execution-security-native.test.ts

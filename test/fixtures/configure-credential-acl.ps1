@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory=$true)][string]$Root,
   [Parameter(Mandatory=$true)][string]$CoreSid,
-  [string]$ExtraSid
+  [string]$ExtraSid,
+  [switch]$Diagnostic
 )
 $ErrorActionPreference = 'Stop'
 $resolved = [IO.Path]::GetFullPath($Root).TrimEnd('\')
@@ -37,8 +38,46 @@ function Set-TestAcl([string]$Path, [bool]$Directory) {
       [Security.AccessControl.PropagationFlags]::None,
       [Security.AccessControl.AccessControlType]::Allow))
   }
-  Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
+  if ($Directory) { [System.IO.Directory]::SetAccessControl($Path, $acl) }
+  else { [System.IO.File]::SetAccessControl($Path, $acl) }
+  return $acl
 }
-Set-TestAcl $resolved $true
-Set-TestAcl $blob $false
+function Get-AceContract($Acl) {
+  @($Acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object {
+    '{0}|{1}|{2}|{3}|{4}|{5}' -f $_.IdentityReference.Value,
+      [int]$_.FileSystemRights, $_.AccessControlType, $_.IsInherited,
+      $_.InheritanceFlags, $_.PropagationFlags
+  } | Sort-Object) -join ';'
+}
+function Read-VerifiedAcl([string]$Path, [bool]$Directory, $Expected) {
+  $actual = if ($Directory) { [System.IO.Directory]::GetAccessControl($Path) }
+    else { [System.IO.File]::GetAccessControl($Path) }
+  if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $operator.Value -or
+      -not $actual.AreAccessRulesProtected -or
+      (Get-AceContract $actual) -cne (Get-AceContract $Expected)) { throw 'TEST_ACL_READBACK_REFUSED' }
+  return $actual
+}
+function Record-Diagnostic([string]$Stage, [string]$Path, $Acl) {
+  if ($Diagnostic) {
+    [pscustomobject]@{
+      Stage=$Stage; Path=$Path; Owner=$Acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+      Protected=$Acl.AreAccessRulesProtected; AceContract=(Get-AceContract $Acl)
+      Sddl=$Acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+    } | ConvertTo-Json -Compress | Write-Output
+  }
+}
+# Protect the existing child before removing the parent's inheritable entries.
+# Any blob write/readback failure aborts before the root is sealed.
+$blobExpected = Set-TestAcl $blob $false
+$blobBefore = Read-VerifiedAcl $blob $false $blobExpected
+Record-Diagnostic 'BLOB_FIRST_VERIFIED' $blob $blobBefore
+$rootExpected = Set-TestAcl $resolved $true
+$rootActual = Read-VerifiedAcl $resolved $true $rootExpected
+Record-Diagnostic 'ROOT_LAST_VERIFIED' $resolved $rootActual
+$blobAfter = Read-VerifiedAcl $blob $false $blobExpected
+if ($blobBefore.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All) -cne
+    $blobAfter.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)) {
+  throw 'TEST_BLOB_DESCRIPTOR_CHANGED'
+}
+Record-Diagnostic 'BLOB_AFTER_ROOT_VERIFIED' $blob $blobAfter
 Write-Output 'TEST_CREDENTIAL_ACL_CONFIGURED'

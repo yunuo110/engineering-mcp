@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { acquireProductionIdentityFrame } from '../src/orchestration/production-credential.ts';
 import type { TrustedRuntimeBinding } from '../src/orchestration/trusted-runtime.ts';
@@ -24,13 +24,15 @@ function seal(plaintext: Buffer): Buffer {
   return result.stdout;
 }
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'engineering-credential-r4-')); roots.push(root);
+  const rawRoot = mkdtempSync(join(tmpdir(), 'engineering-credential-r4-'));
+  const root = realpathSync.native(rawRoot); roots.push(root);
   const credentialBlobPath = join(root, 'bundle.blob');
   return { root, credentialBlobPath, credentialHelperPath: helper } as TrustedRuntimeBinding;
 }
 afterEach(() => {
   for (const root of roots.splice(0)) {
-    if (!root.startsWith(join(tmpdir(), 'engineering-credential-r4-')))
+    if (dirname(root) !== realpathSync.native(tmpdir()) ||
+        !basename(root).startsWith('engineering-credential-r4-'))
       throw new Error('TEST_TEMP_ROOT_GUARD');
     rmSync(root, { recursive: true, force: true });
   }
